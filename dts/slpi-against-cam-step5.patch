@@ -1,0 +1,92 @@
+--- a/sc8180x-surface-pro-x-cam.dts
++++ b/sc8180x-surface-pro-x-cam-slpi.dts
+@@ -744,12 +744,13 @@
+ 		};
+ 
+ 		memory@99200000 {
+-			reg = <0x00 0x99200000 0x00 0x1200000>;
++			reg = <0x00 0x99200000 0x00 0x1400000>;
+ 			no-map;
++			phandle = <0xe5>;
+ 		};
+ 
+-		memory@9a400000 {
+-			reg = <0x00 0x9a400000 0x00 0x5000>;
++		memory@9ab00000 {
++			reg = <0x00 0x9ab00000 0x00 0x5000>;
+ 			no-map;
+ 			phandle = <0x50>;
+ 		};
+@@ -849,12 +850,14 @@
+ 		master-kernel {
+ 			qcom,entry-name = "master-kernel";
+ 			#qcom,smem-state-cells = <0x01>;
++			phandle = <0xe6>;
+ 		};
+ 
+ 		slave-kernel {
+ 			qcom,entry-name = "slave-kernel";
+ 			interrupt-controller;
+ 			#interrupt-cells = <0x02>;
++			phandle = <0xe7>;
+ 		};
+ 	};
+ 
+@@ -2022,6 +2025,57 @@
+ 			phandle = <0x29>;
+ 		};
+ 
++		remoteproc@2400000 {
++			compatible = "qcom,sc8180x-slpi-pas", "qcom,sm8150-slpi-pas";
++			reg = <0x00 0x2400000 0x00 0x4040>;
++			interrupts-extended = <0x01 0x00 0x1ee 0x01 0xe7 0x00 0x01 0xe7 0x01 0x01 0xe7 0x02 0x01 0xe7 0x03 0x01>;
++			interrupt-names = "wdog", "fatal", "ready", "handover", "stop-ack";
++			clocks = <0x2b 0x00>;
++			clock-names = "xo";
++			power-domains = <0x22 0x04 0x22 0x05>;
++			power-domain-names = "lcx", "lmx";
++			qcom,qmp = <0x55>;
++			qcom,smem-states = <0xe6 0x00>;
++			qcom,smem-state-names = "stop";
++			memory-region = <0xe5>;
++			firmware-name = "qcom/msft/surface/pro-x-sq2/qcslpi8180.mbn";
++			status = "okay";
++
++			glink-edge {
++				interrupts = <0x00 0xaa 0x01>;
++				label = "dsps";
++				qcom,remote-pid = <0x03>;
++				mboxes = <0x2a 0x18>;
++
++				fastrpc {
++					compatible = "qcom,fastrpc";
++					qcom,glink-channels = "fastrpcglink-apps-dsp";
++					label = "sdsp";
++					qcom,non-secure-domain;
++					#address-cells = <0x01>;
++					#size-cells = <0x00>;
++
++					compute-cb@1 {
++						compatible = "qcom,fastrpc-compute-cb";
++						reg = <0x01>;
++						iommus = <0x2e 0x5a1 0x00>;
++					};
++
++					compute-cb@2 {
++						compatible = "qcom,fastrpc-compute-cb";
++						reg = <0x02>;
++						iommus = <0x2e 0x5a2 0x00>;
++					};
++
++					compute-cb@3 {
++						compatible = "qcom,fastrpc-compute-cb";
++						reg = <0x03>;
++						iommus = <0x2e 0x5a3 0x00>;
++					};
++				};
++			};
++		};
++
+ 		gpu@2c00000 {
+ 			compatible = "qcom,adreno-680.1", "qcom,adreno";
+ 			reg = <0x00 0x2c00000 0x00 0x40000>;

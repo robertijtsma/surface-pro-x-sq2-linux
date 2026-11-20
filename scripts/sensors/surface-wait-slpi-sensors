@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Wait for Qualcomm SLPI Sensor Core (LSM6DSO) to finish JSON registry init via hexagonrpcd
+set -euo pipefail
+
+[ -c /dev/fastrpc-sdsp ] || exit 0
+
+for _ in $(seq 1 15); do
+    if ssccli --sensor accelerometer --timeout 1 2>/dev/null | grep -q "Accelerometer sensor measurement:"; then
+        exit 0
+    fi
+    sleep 1
+done
+
+exit 0

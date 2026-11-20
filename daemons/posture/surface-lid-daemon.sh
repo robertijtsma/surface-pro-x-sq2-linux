@@ -99,7 +99,7 @@ while true; do
         CUR_STATE="$CANDIDATE_STATE"
         if [ "$CUR_STATE" = "closed" ]; then
             logger -t surface-lid-daemon "Posture: closed -> Screen off, lock session, power-saver"
-            set_tablet_switch_inhibit 1
+            set_tablet_switch_inhibit 0
             run_user_gsettings_if_changed org.gnome.desktop.a11y.applications screen-keyboard-enabled false
             loginctl lock-sessions 2>/dev/null || true
             powerprofilesctl set power-saver 2>/dev/null || true
@@ -111,7 +111,7 @@ while true; do
             if [ -w /sys/class/backlight/backlight/bl_power ]; then
                 echo 0 > /sys/class/backlight/backlight/bl_power 2>/dev/null || true
             fi
-            set_tablet_switch_inhibit 1
+            set_tablet_switch_inhibit 0
             if [ -n "$LAST_APPLIED_STATE" ]; then
                 powerprofilesctl set balanced 2>/dev/null || true
                 run_user_gsettings_if_changed org.gnome.desktop.a11y.applications screen-keyboard-enabled false

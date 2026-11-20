@@ -19,6 +19,7 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 | **Slim Pen 2 BLE Auto-Connect** | Experimental | Best-effort BlueZ LE/contact daemons (`daemons/pen/`); core IPTS drawing/hover works independently without BLE |
 | **Display & Adreno 685 GPU** | Working | `eDP` 2880×1920, Freedreno/Turnip with `noubwc` (`libcamera/environment.d/99-surface-gpu.conf`) |
 | **Ambient Light Sensor (`TCS3430`)** | Working | Direct `/dev/i2c-0` `0x39` adaptive brightness daemon (`daemons/display/surface-auto-brightness`) |
+| **Accelerometer, Compass & Auto-Rotation (`SLPI`)** | Working | `remoteproc_slpi` + FastRPC (`dts/sc8180x-surface-pro-x-sq2-slpi.dtsi`), `hexagonrpcd`, `libssc`, `iio-sensor-proxy` (`LSM6DSO` + `AK0991x`) |
 | **Type Cover, Posture & Lid Handling** | Working | SAM posture daemon (`closed`/`laptop`/`tablet`), eDP blank + lock on close (`daemons/posture/surface-lid-daemon.sh`) |
 | **CPU Power Profiles (`SC8180X`)** | Working | Native UPower/hadess D-Bus `PowerProfiles` manager (`daemons/power/surface-power-profile`) |
 | **Hardware GNSS (`QMI LOC`)** | Working | On-demand QRTR QMI LOC → NMEA Unix socket bridge (`/run/surface-gps.sock`) |

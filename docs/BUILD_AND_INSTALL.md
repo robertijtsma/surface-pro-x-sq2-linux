@@ -106,3 +106,44 @@ sudo systemctl daemon-reload
 ```
 
 Enable the services you want (`surface-audio-boot-sync.service`, `surface-bluetooth-mac.service`, `surface-power-profile.service`, `surface-lid-daemon.service`, `surface-qmi-gps.service`, and optionally the experimental pen BLE daemons).
+
+## 6. SLPI Sensor Hub (Accelerometer, Compass & Auto-Rotation)
+
+The LSM6DSO 6-axis IMU and AK0991x magnetometer are attached to the Qualcomm SLPI DSP (`remoteproc@2400000`). Bringing them up requires the device's `qcslpi8180.mbn` firmware and OEM sensor registry JSONs from Windows (or fetched from Windows Update with `wudrivers`), plus [`hexagonrpcd`](https://github.com/linux-msm/hexagonrpc), `libssc`, and `iio-sensor-proxy`.
+
+1. **Stage firmware and OEM sensor configs** (from `surfaceprox_subextscss` and `SurfaceProX_sensorsconfig`):
+   - `/lib/firmware/qcom/msft/surface/pro-x-sq2/qcslpi8180.mbn`
+   - `/usr/share/qcom/sc8180x/microsoft/surface-pro-x/sensors/config/` (`*.json` and `config_list.txt`)
+   - `/usr/share/qcom/sc8180x/microsoft/surface-pro-x/sensors/registry/` (writable empty directory)
+   - `/usr/share/qcom/sc8180x/microsoft/surface-pro-x/socinfo/` (`hw_platform`, `platform_subtype`, `platform_subtype_id`, `platform_version`, `revision`, `soc_id`)
+
+2. **Build and install `hexagonrpcd`**:
+
+```bash
+git clone https://github.com/linux-msm/hexagonrpc.git
+cd hexagonrpc
+meson setup build --prefix=/usr/local
+ninja -C build
+sudo ninja -C build install
+sudo ldconfig
+```
+
+3. **Apply the SLPI DTB patch and install service/udev files**:
+
+```bash
+# Apply dts/slpi-against-cam-step5.patch (or include dts/sc8180x-surface-pro-x-sq2-slpi.dtsi)
+# and compile the resulting DTB with dtc.
+
+sudo pacman -S libssc iio-sensor-proxy
+sudo install -m 755 scripts/sensors/surface-wait-slpi-sensors /usr/local/bin/
+sudo install -m 644 configs/udev/81-surface-pro-x-sensors.rules /etc/udev/rules.d/
+sudo install -m 644 systemd/hexagonrpcd-sdsp.service /etc/systemd/system/
+sudo install -Dm644 systemd/iio-sensor-proxy.service.d/after-hexagonrpcd.conf \
+    /etc/systemd/system/iio-sensor-proxy.service.d/after-hexagonrpcd.conf
+sudo systemctl daemon-reload
+sudo systemctl enable hexagonrpcd-sdsp.service
+sudo udevadm control --reload-rules
+```
+
+After rebooting into the SLPI-enabled DTB, `monitor-sensor` reports live accelerometer orientation and compass heading, and GNOME automatically rotates the display when the Type Cover is folded back or detached.
+
