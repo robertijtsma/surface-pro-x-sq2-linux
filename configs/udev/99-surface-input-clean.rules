@@ -1,0 +1,5 @@
+# Ignore raw SPI HID nodes handled by iptsd so libinput/logind don't open 8 unused event nodes
+ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="spi 045E:0C21*", ENV{LIBINPUT_IGNORE_DEVICE}="1"
+# Ignore unused Surface SSAM vendor HID nodes that have no input keys/axes
+ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="Microsoft Surface 045E:09AF UNKNOWN", ENV{LIBINPUT_IGNORE_DEVICE}="1"
+ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="Microsoft Surface 045E:09B0", ENV{LIBINPUT_IGNORE_DEVICE}="1"

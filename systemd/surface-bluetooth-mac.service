@@ -1,0 +1,11 @@
+[Unit]
+Description=Configure Surface Pro X WCN3998 Bluetooth Public Address
+After=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/surface-bt-mac.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

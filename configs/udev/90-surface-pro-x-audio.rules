@@ -1,0 +1,4 @@
+# Keep the WCD934x SoundWire master and WSA881x amps out of runtime suspend
+# (a failed clock-stop on suspend can latch an error that breaks playback until reboot).
+ACTION=="add|change", SUBSYSTEM=="platform", KERNEL=="wcd934x-soundwire.*", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="add|change", SUBSYSTEM=="soundwire", KERNEL=="sdw:*:0217:2110:*", TEST=="power/control", ATTR{power/control}="on"

@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""
+Surface Pro X - Native Power Profiles & Dynamic Energy Manager
+Implements org.freedesktop.UPower.PowerProfiles & net.hadess.PowerProfiles D-Bus interfaces.
+Exposes full 3 profiles to GNOME Quick Settings & Settings:
+  - ⚡ performance (Prestaties): all cores max clock (3.15 GHz)
+  - ⚖️ balanced (Gebalanceerd): schedutil dynamic scaling (300 MHz - 3.15 GHz)
+  - 🔋 power-saver (Energiebesparing): powersave governor (300 MHz / 825 MHz)
+
+Automatic Behavior:
+  - On AC (cable plugged in): Balanced mode (schedutil 300 MHz - 3.15 GHz dynamic scaling)
+  - On Battery: Balanced mode
+  - Low Battery (<= 20%): Power Saver mode
+  - Full manual control from GNOME UI whenever desired ('performance' locks max clock)
+"""
+
+import sys
+import os
+import time
+import signal
+import gi
+from gi.repository import Gio, GLib
+
+XML_TEMPLATE = """
+<node>
+  <interface name='@IFACE@'>
+    <method name='HoldProfile'>
+      <arg type='s' name='profile' direction='in'/>
+      <arg type='s' name='reason' direction='in'/>
+      <arg type='s' name='application_id' direction='in'/>
+      <arg type='u' name='cookie' direction='out'/>
+    </method>
+    <method name='ReleaseProfile'>
+      <arg type='u' name='cookie' direction='in'/>
+    </method>
+    <signal name='ProfileReleased'>
+      <arg type='u' name='cookie'/>
+    </signal>
+    <property type='s' name='ActiveProfile' access='readwrite'/>
+    <property type='s' name='PerformanceInhibited' access='read'/>
+    <property type='s' name='PerformanceDegraded' access='read'/>
+    <property type='aa{sv}' name='Profiles' access='read'/>
+    <property type='as' name='Actions' access='read'/>
+    <property type='aa{sv}' name='ActiveProfileHolds' access='read'/>
+    <property type='s' name='Version' access='read'/>
+  </interface>
+</node>
+"""
+
+class SurfacePowerManager:
+    def __init__(self):
+        self.bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        self.active_profile = 'balanced'
+        self.manual_override = False
+        self.last_ac_online = None
+        self.cookie_counter = 1
+        self.holds = {}
+
+        # 1. Register modern UPower interface
+        xml_upower = XML_TEMPLATE.replace('@IFACE@', 'org.freedesktop.UPower.PowerProfiles')
+        node_upower = Gio.DBusNodeInfo.new_for_xml(xml_upower)
+        self.info_upower = node_upower.interfaces[0]
+
+        self.reg_upower = self.bus.register_object(
+            '/org/freedesktop/UPower/PowerProfiles',
+            self.info_upower,
+            self.handle_method_call,
+            self.handle_get_property,
+            self.handle_set_property
+        )
+
+        self.owner_upower = Gio.bus_own_name_on_connection(
+            self.bus,
+            'org.freedesktop.UPower.PowerProfiles',
+            Gio.BusNameOwnerFlags.REPLACE,
+            lambda c, n: print(f"[SurfacePower] Acquired {n}"),
+            lambda c, n: print(f"[SurfacePower] Lost {n}", file=sys.stderr)
+        )
+
+        # 2. Register legacy hadess interface
+        xml_hadess = XML_TEMPLATE.replace('@IFACE@', 'net.hadess.PowerProfiles')
+        node_hadess = Gio.DBusNodeInfo.new_for_xml(xml_hadess)
+        self.info_hadess = node_hadess.interfaces[0]
+
+        self.reg_hadess = self.bus.register_object(
+            '/net/hadess/PowerProfiles',
+            self.info_hadess,
+            self.handle_method_call,
+            self.handle_get_property,
+            self.handle_set_property
+        )
+
+        self.owner_hadess = Gio.bus_own_name_on_connection(
+            self.bus,
+            'net.hadess.PowerProfiles',
+            Gio.BusNameOwnerFlags.REPLACE,
+            lambda c, n: print(f"[SurfacePower] Acquired {n}"),
+            lambda c, n: print(f"[SurfacePower] Lost {n}", file=sys.stderr)
+        )
+
+        # Initial check & apply
+        self.evaluate_power_source(initial=True)
+
+    def get_ac_online(self):
+        for path in ['/sys/class/power_supply/ADP1/online', '/sys/class/power_supply/AC/online']:
+            if os.path.exists(path):
+                try:
+                    with open(path) as f:
+                        return f.read().strip() == '1'
+                except Exception:
+                    pass
+        return True
+
+    def get_battery_capacity(self):
+        for path in ['/sys/class/power_supply/BAT1/capacity', '/sys/class/power_supply/BAT0/capacity']:
+            if os.path.exists(path):
+                try:
+                    with open(path) as f:
+                        return int(f.read().strip())
+                except Exception:
+                    pass
+        return 100
+
+    def apply_governors(self, profile):
+        """Configure Qualcomm SC8180X CPU frequency scaling governors."""
+        if profile == 'performance':
+            p0_gov, p4_gov = 'performance', 'performance'
+        elif profile == 'power-saver':
+            p0_gov, p4_gov = 'powersave', 'powersave'
+        else:  # balanced
+            p0_gov, p4_gov = 'schedutil', 'schedutil'
+
+        try:
+            with open('/sys/devices/system/cpu/cpufreq/policy0/scaling_governor', 'w') as f:
+                f.write(p0_gov)
+            with open('/sys/devices/system/cpu/cpufreq/policy4/scaling_governor', 'w') as f:
+                f.write(p4_gov)
+            print(f"[SurfacePower] Applied {profile}: policy0={p0_gov}, policy4={p4_gov}")
+        except Exception as e:
+            print(f"[SurfacePower] Error applying governor: {e}", file=sys.stderr)
+
+    def set_active_profile(self, profile, is_manual=False):
+        if profile not in ['performance', 'balanced', 'power-saver']:
+            return False
+
+        if is_manual:
+            self.manual_override = True
+            print(f"[SurfacePower] User manually selected: {profile}")
+        else:
+            print(f"[SurfacePower] Auto-selected profile: {profile}")
+
+        self.active_profile = profile
+        self.apply_governors(profile)
+
+        # Emit PropertiesChanged on both modern and legacy D-Bus paths
+        prop_dict = {'ActiveProfile': GLib.Variant('s', profile)}
+        
+        self.bus.emit_signal(
+            None,
+            '/org/freedesktop/UPower/PowerProfiles',
+            'org.freedesktop.DBus.Properties',
+            'PropertiesChanged',
+            GLib.Variant('(sa{sv}as)', ('org.freedesktop.UPower.PowerProfiles', prop_dict, []))
+        )
+        self.bus.emit_signal(
+            None,
+            '/net/hadess/PowerProfiles',
+            'org.freedesktop.DBus.Properties',
+            'PropertiesChanged',
+            GLib.Variant('(sa{sv}as)', ('net.hadess.PowerProfiles', prop_dict, []))
+        )
+        return True
+
+    def evaluate_power_source(self, initial=False):
+        ac_online = self.get_ac_online()
+        capacity = self.get_battery_capacity()
+
+        # If AC connection state changed, reset manual override
+        if self.last_ac_online is not None and ac_online != self.last_ac_online:
+            print(f"[SurfacePower] Power state transition: {'AC plugged in' if ac_online else 'Running on battery'}")
+            self.manual_override = False
+
+        self.last_ac_online = ac_online
+
+        if self.manual_override and not initial:
+            return
+
+        # Auto-selection logic: use dynamic schedutil ('balanced') on both AC and battery
+        # so cores scale cleanly down to 300/825 MHz when idle and boost to 3.15 GHz on load.
+        # Users can still select 'performance' manually via GNOME Quick Settings at any time.
+        if not ac_online and capacity <= 20:
+            target = 'power-saver'
+        else:
+            target = 'balanced'
+
+        if target != self.active_profile or initial:
+            self.set_active_profile(target, is_manual=False)
+
+    def tick(self):
+        self.evaluate_power_source()
+        return True
+
+    def handle_method_call(self, connection, sender, object_path, interface_name, method_name, parameters, invocation):
+        if method_name == 'HoldProfile':
+            profile, reason, app_id = parameters.unpack()
+            cookie = self.cookie_counter
+            self.cookie_counter += 1
+            self.holds[cookie] = {'Profile': profile, 'Reason': reason, 'ApplicationId': app_id}
+            invocation.return_value(GLib.Variant('(u)', (cookie,)))
+        elif method_name == 'ReleaseProfile':
+            cookie = parameters.unpack()[0]
+            if cookie in self.holds:
+                del self.holds[cookie]
+                connection.emit_signal(None, object_path, interface_name, 'ProfileReleased', GLib.Variant('(u)', (cookie,)))
+            invocation.return_value(None)
+        else:
+            invocation.return_error_literal(Gio.dbus_error_quark(), Gio.DBusError.UNKNOWN_METHOD, 'Unknown method')
+
+    def handle_get_property(self, connection, sender, object_path, interface_name, property_name):
+        if property_name == 'ActiveProfile':
+            return GLib.Variant('s', self.active_profile)
+        elif property_name == 'PerformanceInhibited':
+            return GLib.Variant('s', '')
+        elif property_name == 'PerformanceDegraded':
+            return GLib.Variant('s', '')
+        elif property_name == 'Version':
+            return GLib.Variant('s', '0.30')
+        elif property_name == 'Actions':
+            return GLib.Variant('as', [])
+        elif property_name == 'ActiveProfileHolds':
+            return GLib.Variant('aa{sv}', [])
+        elif property_name == 'Profiles':
+            profs = [
+                {'Profile': GLib.Variant('s', 'performance'), 'Driver': GLib.Variant('s', 'surface-power'), 'PlatformDriver': GLib.Variant('s', 'surface-power')},
+                {'Profile': GLib.Variant('s', 'balanced'), 'Driver': GLib.Variant('s', 'surface-power'), 'PlatformDriver': GLib.Variant('s', 'surface-power')},
+                {'Profile': GLib.Variant('s', 'power-saver'), 'Driver': GLib.Variant('s', 'surface-power'), 'PlatformDriver': GLib.Variant('s', 'surface-power')}
+            ]
+            return GLib.Variant('aa{sv}', profs)
+        return None
+
+    def handle_set_property(self, connection, sender, object_path, interface_name, property_name, value):
+        if property_name == 'ActiveProfile':
+            new_profile = value.unpack()
+            return self.set_active_profile(new_profile, is_manual=True)
+        return False
+
+    def run(self):
+        print(f"[SurfacePower] Service active. Initial profile: {self.active_profile}")
+        loop = GLib.MainLoop()
+        GLib.timeout_add_seconds(5, self.tick)
+
+        def sig_handler(sig, frame):
+            print("\n[SurfacePower] Exiting cleanly...")
+            self.apply_governors('balanced')
+            loop.quit()
+
+        signal.signal(signal.SIGINT, sig_handler)
+        signal.signal(signal.SIGTERM, sig_handler)
+
+        loop.run()
+
+
+if __name__ == '__main__':
+    manager = SurfacePowerManager()
+    manager.run()

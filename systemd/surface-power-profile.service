@@ -1,0 +1,14 @@
+[Unit]
+Description=Surface Pro X Native Power Profiles & Dynamic Energy Manager
+Documentation=man:powerprofilesctl(1)
+Before=display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/surface-power-profile
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

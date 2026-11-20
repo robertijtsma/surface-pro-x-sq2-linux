@@ -1,0 +1,12 @@
+[Unit]
+Description=Surface Pro X Safe Type Cover Lid & Power Daemon
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/surface-lid-daemon.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Surface Pro X Audio UCM & SoundWire Power Sync
+After=sound.target systemd-udevd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/surface-audio-boot-sync.sh
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

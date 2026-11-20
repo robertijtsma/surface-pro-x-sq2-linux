@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""
+Surface Slim Pen BLE Auto-Connect Daemon (experimental / best-effort).
+
+Listens for BLE advertisements from a paired Surface Pen and triggers BlueZ
+Device1.Connect() when the tail button wakes the pen.
+
+Configuration:
+  - Set SURFACE_PEN_MAC="AA:BB:CC:DD:EE:FF" in the environment, OR
+  - Leave unset to auto-discover any paired BlueZ device named "Surface Slim Pen"
+    or "Surface Pen".
+
+Fixes compared to naive startup scripts:
+  - Waits for hci0 Powered=True (avoids org.bluez.Error.NotReady during boot while
+    surface-bluetooth-mac.service is still setting the WCN3998 public BD_ADDR).
+  - Filters D-Bus PropertiesChanged signals strictly to sender="org.bluez".
+"""
+
+import os
+import sys
+import dbus
+import dbus.mainloop.glib
+from gi.repository import GLib
+
+ADAPTER_PATH = "/org/bluez/hci0"
+
+dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+bus = dbus.SystemBus()
+mainloop = GLib.MainLoop()
+
+adapter = None
+adapter_props = None
+pen_device = None
+target_path = None
+is_connecting = False
+
+
+def discover_target_path():
+    mac = os.environ.get("SURFACE_PEN_MAC", "").strip().upper()
+    if mac:
+        return f"{ADAPTER_PATH}/dev_{mac.replace(':', '_')}"
+
+    try:
+        om = dbus.Interface(
+            bus.get_object("org.bluez", "/"),
+            "org.freedesktop.DBus.ObjectManager",
+        )
+        for path, ifaces in om.GetManagedObjects().items():
+            dev = ifaces.get("org.bluez.Device1")
+            if not dev or not dev.get("Paired"):
+                continue
+            name = str(dev.get("Name", "") or dev.get("Alias", ""))
+            if "surface" in name.lower() and "pen" in name.lower():
+                return str(path)
+    except Exception as exc:
+        print(f"BlueZ object scan failed: {exc}", flush=True)
+    return None
+
+
+def ensure_pen_proxy():
+    global target_path, pen_device
+    if pen_device and target_path:
+        return True
+    target_path = discover_target_path()
+    if not target_path:
+        return False
+    try:
+        pen_device = dbus.Interface(
+            bus.get_object("org.bluez", target_path),
+            "org.bluez.Device1",
+        )
+        print(f"Tracking paired Surface Pen at {target_path}", flush=True)
+        return True
+    except Exception as exc:
+        print(f"Failed to bind pen object {target_path}: {exc}", flush=True)
+        pen_device = None
+        return False
+
+
+def connect_pen():
+    global is_connecting
+    if is_connecting or not ensure_pen_proxy():
+        return
+    try:
+        props = dbus.Interface(
+            bus.get_object("org.bluez", target_path),
+            "org.freedesktop.DBus.Properties",
+        )
+        if props.Get("org.bluez.Device1", "Connected"):
+            return
+        print("Surface Pen advertisement detected; connecting...", flush=True)
+        is_connecting = True
+        pen_device.Connect(
+            reply_handler=on_connect_success,
+            error_handler=on_connect_error,
+            timeout=10,
+        )
+    except Exception as exc:
+        is_connecting = False
+        print(f"Connect trigger error: {exc}", flush=True)
+
+
+def on_connect_success():
+    global is_connecting
+    is_connecting = False
+    print("Surface Pen connected via Bluetooth.", flush=True)
+
+
+def on_connect_error(err):
+    global is_connecting
+    is_connecting = False
+    print(f"Surface Pen connect finished: {err}", flush=True)
+
+
+def start_le_discovery():
+    if not adapter or not adapter_props:
+        return False
+    try:
+        if not adapter_props.Get("org.bluez.Adapter1", "Powered"):
+            return False
+        if not adapter_props.Get("org.bluez.Adapter1", "Discovering"):
+            adapter.SetDiscoveryFilter(
+                dbus.Dictionary(
+                    {
+                        "Transport": dbus.String("le"),
+                        "DuplicateData": dbus.Boolean(True),
+                    },
+                    signature="sv",
+                )
+            )
+            adapter.StartDiscovery()
+            print("BLE passive discovery active for Surface Pen.", flush=True)
+        return True
+    except Exception as exc:
+        print(f"Discovery deferred ({exc}); waiting for adapter ready...", flush=True)
+        return False
+
+
+def on_properties_changed(interface, changed, invalidated, path=None):
+    if path == ADAPTER_PATH and interface == "org.bluez.Adapter1":
+        if changed.get("Powered"):
+            ensure_pen_proxy()
+            start_le_discovery()
+        return
+
+    if target_path and path == target_path and interface == "org.bluez.Device1":
+        if "RSSI" in changed or "ManufacturerData" in changed:
+            connect_pen()
+        if "Connected" in changed:
+            if changed["Connected"]:
+                print("Surface Pen is CONNECTED.", flush=True)
+            else:
+                print("Surface Pen disconnected (idle sleep).", flush=True)
+                start_le_discovery()
+
+
+def on_interfaces_added(path, interfaces):
+    if not target_path:
+        ensure_pen_proxy()
+    if target_path and path == target_path:
+        connect_pen()
+
+
+def periodic_check():
+    if not target_path:
+        ensure_pen_proxy()
+    start_le_discovery()
+    return True
+
+
+def main():
+    global adapter, adapter_props
+
+    try:
+        adapter_obj = bus.get_object("org.bluez", ADAPTER_PATH)
+        adapter = dbus.Interface(adapter_obj, "org.bluez.Adapter1")
+        adapter_props = dbus.Interface(adapter_obj, "org.freedesktop.DBus.Properties")
+    except Exception as exc:
+        print(f"Failed to bind BlueZ adapter {ADAPTER_PATH}: {exc}", flush=True)
+        sys.exit(1)
+
+    bus.add_signal_receiver(
+        on_properties_changed,
+        sender="org.bluez",
+        dbus_interface="org.freedesktop.DBus.Properties",
+        signal_name="PropertiesChanged",
+        path_keyword="path",
+    )
+    bus.add_signal_receiver(
+        on_interfaces_added,
+        sender="org.bluez",
+        dbus_interface="org.freedesktop.DBus.ObjectManager",
+        signal_name="InterfacesAdded",
+    )
+
+    ensure_pen_proxy()
+    start_le_discovery()
+    GLib.timeout_add_seconds(10, periodic_check)
+
+    try:
+        mainloop.run()
+    except (KeyboardInterrupt, SystemExit):
+        try:
+            adapter.StopDiscovery()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()

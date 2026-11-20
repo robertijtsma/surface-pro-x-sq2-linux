@@ -1,0 +1,2 @@
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="input[0-9]*", ATTR{name}=="*Tablet Mode Switch*", ATTR{inhibited}="1"
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event[0-9]*", ATTRS{name}=="*Tablet Mode Switch*", ENV{LIBINPUT_IGNORE_DEVICE}="1"

@@ -1,0 +1,3 @@
+# Surface Pro X Dynamic Power Profile Udev Rule
+# Triggers on AC plug/unplug and battery level changes
+SUBSYSTEM=="power_supply", ACTION=="change", RUN+="/usr/local/sbin/surface-auto-power-profile.sh"

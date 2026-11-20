@@ -1,0 +1,7 @@
+{
+  "name": "Surface Smart OSK",
+  "description": "Smart Touch Keyboard for Surface: 2-finger slide down to dismiss, prevent annoying re-open loops on focused fields, and automatic physical keyboard detection.",
+  "uuid": "surface-smart-osk@linux-surface",
+  "shell-version": ["51", "51.1", "50", "49", "48", "47", "46", "45"],
+  "version": 1
+}

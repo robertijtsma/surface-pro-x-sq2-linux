@@ -1,0 +1,13 @@
+[Unit]
+Description=Surface Slim Pen 2 Bluetooth Screen-Contact Auto-Connect
+After=surface-iptsd.service bluetooth.service
+Wants=surface-iptsd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/surface-pen-bluetooth-autoconnect
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target

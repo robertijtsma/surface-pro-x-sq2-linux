@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+"""
+Surface Pro X - Multi-Touch Twist-to-Rotate & Tablet Mode Daemon
+1. Multi-Touch Screen Rotation: 4-5 finger twist gesture rotates display silently via native hardware key emulation.
+2. Tablet Mode Integration: Monitors KIP Tablet Mode Switch to automatically enable On-Screen Keyboard (OSK) when keyboard is folded back or detached, and disable it when in laptop typing mode.
+"""
+
+import sys
+import os
+import math
+import time
+import argparse
+import select
+import array
+import fcntl
+
+try:
+    import evdev
+    from evdev import ecodes, UInput
+except ImportError:
+    print("[Error] python-evdev is required. Install with: sudo pacman -S python-evdev", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    import gi
+    from gi.repository import Gio, GLib
+except ImportError:
+    print("[Error] PyGObject is required.", file=sys.stderr)
+    sys.exit(1)
+
+
+class HardwareRotator:
+    """Emits native Mutter hardware rotation key events (XF86RotateWindows)."""
+    def __init__(self):
+        try:
+            self.ui = UInput({ecodes.EV_KEY: [ecodes.KEY_ROTATE_DISPLAY]}, name='Surface-Hardware-Rotator')
+            time.sleep(0.1)
+        except PermissionError:
+            print("[Error] Permission denied opening /dev/uinput.", file=sys.stderr)
+            sys.exit(1)
+
+    def rotate_cw(self):
+        """Rotate 90 degrees clockwise (native 1-pulse)."""
+        self.ui.write(ecodes.EV_KEY, ecodes.KEY_ROTATE_DISPLAY, 1)
+        self.ui.syn()
+        time.sleep(0.02)
+        self.ui.write(ecodes.EV_KEY, ecodes.KEY_ROTATE_DISPLAY, 0)
+        self.ui.syn()
+        print("[Rotator] Screen rotated CLOCKWISE (Right)")
+
+    def rotate_ccw(self):
+        """Rotate 90 degrees counter-clockwise (3 pulses = 270° forward = 90° back)."""
+        for _ in range(3):
+            self.ui.write(ecodes.EV_KEY, ecodes.KEY_ROTATE_DISPLAY, 1)
+            self.ui.syn()
+            time.sleep(0.02)
+            self.ui.write(ecodes.EV_KEY, ecodes.KEY_ROTATE_DISPLAY, 0)
+            self.ui.syn()
+            time.sleep(0.02)
+        print("[Rotator] Screen rotated COUNTER-CLOCKWISE (Left)")
+
+    def close(self):
+        if hasattr(self, 'ui') and self.ui:
+            self.ui.close()
+
+
+class TabletModeManager:
+    """Manages GNOME on-screen keyboard based on hardware tablet mode switch."""
+    def __init__(self):
+        try:
+            self.settings = Gio.Settings.new('org.gnome.desktop.a11y.applications')
+        except Exception as e:
+            print(f"[TabletMode Warning] Could not initialize a11y settings: {e}")
+            self.settings = None
+
+    def set_osk(self, enable: bool):
+        if not self.settings:
+            return
+        try:
+            current = self.settings.get_boolean('screen-keyboard-enabled')
+            if current != enable:
+                self.settings.set_boolean('screen-keyboard-enabled', enable)
+                state_str = "ENABLED (Tablet Mode)" if enable else "DISABLED (Laptop Mode)"
+                print(f"[TabletMode] On-Screen Keyboard {state_str}")
+        except Exception as e:
+            print(f"[TabletMode Error] Setting screen-keyboard-enabled failed: {e}")
+
+    def toggle_osk(self):
+        if not self.settings:
+            return
+        current = self.settings.get_boolean('screen-keyboard-enabled')
+        self.set_osk(not current)
+
+
+def find_devices():
+    """Locates Touchscreen and Tablet Mode Switch devices dynamically."""
+    touch = None
+    switch = None
+    for path in evdev.list_devices():
+        try:
+            dev = evdev.InputDevice(path)
+            name = dev.name.lower()
+            if 'virtual touchscreen' in name or ('touchscreen' in name and 'stylus' not in name):
+                touch = dev
+            elif 'tablet mode switch' in name or 'tabletsw' in name or 'kip' in name:
+                switch = dev
+        except Exception:
+            continue
+    return touch, switch
+
+
+def get_current_switch_state(dev):
+    """Queries current SW_TABLET_MODE state from switch device using EVIOCGSW ioctl."""
+    buf = array.array('B', [0] * 8)
+    IOC_READ = 2
+    IOC_DIRSHIFT = 30
+    IOC_TYPESHIFT = 8
+    IOC_NRSHIFT = 0
+    IOC_SIZESHIFT = 16
+    cmd = ((IOC_READ << IOC_DIRSHIFT) |
+           (ord('E') << IOC_TYPESHIFT) |
+           (0x1b << IOC_NRSHIFT) |
+           (8 << IOC_SIZESHIFT))
+    try:
+        fcntl.ioctl(dev.fileno(), cmd, buf, True)
+        return (buf[0] >> 1) & 1
+    except Exception:
+        return 0
+
+
+class GestureTracker:
+    def __init__(self, rotator):
+        self.rotator = rotator
+        self.touches = {}         # slot -> [x, y]
+        self.initial_angles = {}  # slot -> angle
+        self.gesture_active = False
+        self.gesture_start_time = 0
+        self.cooldown_until = 0
+
+    def handle_sync(self):
+        now = time.time()
+        if now < self.cooldown_until:
+            return
+
+        active_count = len(self.touches)
+
+        if active_count >= 4:
+            xs = [p[0] for p in self.touches.values()]
+            ys = [p[1] for p in self.touches.values()]
+            cx = sum(xs) / len(xs)
+            cy = sum(ys) / len(ys)
+
+            radii = [math.hypot(p[0] - cx, p[1] - cy) for p in self.touches.values()]
+            avg_radius = sum(radii) / len(radii)
+
+            if avg_radius < 250:
+                return
+
+            if not self.gesture_active:
+                self.gesture_active = True
+                self.gesture_start_time = now
+                self.initial_angles = {}
+                for slot, pt in self.touches.items():
+                    self.initial_angles[slot] = math.atan2(pt[1] - cy, pt[0] - cx)
+            else:
+                if now - self.gesture_start_time > 2.5:
+                    self.gesture_active = False
+                    self.initial_angles.clear()
+                    return
+
+                deltas = []
+                for slot, pt in self.touches.items():
+                    if slot in self.initial_angles:
+                        cur_ang = math.atan2(pt[1] - cy, pt[0] - cx)
+                        init_ang = self.initial_angles[slot]
+                        diff = cur_ang - init_ang
+                        diff = (diff + math.pi) % (2 * math.pi) - math.pi
+                        deltas.append(diff)
+
+                if len(deltas) >= 3:
+                    avg_delta = sum(deltas) / len(deltas)
+
+                    # Negative delta = Counter-Clockwise twist (left)
+                    if avg_delta < -0.45:
+                        print(f"[Gesture] Detected LEFT twist! ({math.degrees(avg_delta):.1f}° with {active_count} fingers)")
+                        self.rotator.rotate_cw()
+                        self.cooldown_until = now + 1.2
+                        self.gesture_active = False
+                        self.initial_angles.clear()
+                    # Positive delta = Clockwise twist (right)
+                    elif avg_delta > 0.45:
+                        print(f"[Gesture] Detected RIGHT twist! (+{math.degrees(avg_delta):.1f}° with {active_count} fingers)")
+                        self.rotator.rotate_ccw()
+                        self.cooldown_until = now + 1.2
+                        self.gesture_active = False
+                        self.initial_angles.clear()
+        else:
+            if active_count < 3:
+                self.gesture_active = False
+                self.initial_angles.clear()
+
+
+def run_daemon():
+    rotator = HardwareRotator()
+    tablet_mgr = TabletModeManager()
+    print("[Surface-Touch-Rotate] Daemon starting...")
+
+    while True:
+        touch_dev, switch_dev = find_devices()
+
+        if not touch_dev:
+            print("[Surface-Touch-Rotate] Waiting for touchscreen device...")
+            time.sleep(3)
+            continue
+
+        print(f"[Surface-Touch-Rotate] Touchscreen active: {touch_dev.path} ({touch_dev.name})")
+
+        # Sync initial tablet mode state if switch exists
+        if switch_dev:
+            print(f"[Surface-Touch-Rotate] Tablet switch active: {switch_dev.path} ({switch_dev.name})")
+            initial_state = get_current_switch_state(switch_dev)
+            tablet_mgr.set_osk(initial_state == 1)
+        else:
+            print("[Surface-Touch-Rotate] Tablet switch not found (Type Cover detached -> OSK Enabled).")
+            tablet_mgr.set_osk(True)
+
+        gesture_tracker = GestureTracker(rotator)
+        current_slot = 0
+
+        # Build poll list
+        devices = {touch_dev.fd: touch_dev}
+        if switch_dev:
+            devices[switch_dev.fd] = switch_dev
+
+        try:
+            while True:
+                r, _, _ = select.select(list(devices.keys()), [], [], 5.0)
+                for fd in r:
+                    dev = devices.get(fd)
+                    if not dev:
+                        continue
+                    for event in dev.read():
+                        # Touchscreen events
+                        if dev == touch_dev:
+                            if event.type == ecodes.EV_ABS:
+                                if event.code == ecodes.ABS_MT_SLOT:
+                                    current_slot = event.value
+                                elif event.code == ecodes.ABS_MT_TRACKING_ID:
+                                    if event.value == -1:
+                                        gesture_tracker.touches.pop(current_slot, None)
+                                    else:
+                                        if current_slot not in gesture_tracker.touches:
+                                            gesture_tracker.touches[current_slot] = [0, 0]
+                                elif event.code == ecodes.ABS_MT_POSITION_X:
+                                    if current_slot in gesture_tracker.touches:
+                                        gesture_tracker.touches[current_slot][0] = event.value
+                                elif event.code == ecodes.ABS_MT_POSITION_Y:
+                                    if current_slot in gesture_tracker.touches:
+                                        gesture_tracker.touches[current_slot][1] = event.value
+                            elif event.type == ecodes.EV_SYN and event.code == ecodes.SYN_REPORT:
+                                gesture_tracker.handle_sync()
+
+                        # Tablet switch events
+                        elif dev == switch_dev:
+                            if event.type == ecodes.EV_SW and event.code == ecodes.SW_TABLET_MODE:
+                                is_tablet = (event.value == 1)
+                                tablet_mgr.set_osk(is_tablet)
+
+        except (OSError, Exception) as e:
+            print(f"[Surface-Touch-Rotate] Device event stream interrupted ({e}), re-probing in 2s...")
+            for d in devices.values():
+                try:
+                    d.close()
+                except Exception:
+                    pass
+            time.sleep(2)
+        except KeyboardInterrupt:
+            print("[Surface-Touch-Rotate] Exiting.")
+            for d in devices.values():
+                try:
+                    d.close()
+                except Exception:
+                    pass
+            break
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Surface Pro X Touchscreen & Tablet Mode Controller")
+    parser.add_argument("-cw", "--rotate-cw", action="store_true", help="Rotate screen 90° clockwise")
+    parser.add_argument("-ccw", "--rotate-ccw", action="store_true", help="Rotate screen 90° counter-clockwise")
+    parser.add_argument("--toggle-osk", action="store_true", help="Toggle on-screen keyboard")
+    parser.add_argument("-d", "--daemon", action="store_true", help="Run touch & tablet mode daemon")
+    args = parser.parse_args()
+
+    if args.rotate_cw:
+        r = HardwareRotator()
+        r.rotate_cw()
+        r.close()
+    elif args.rotate_ccw:
+        r = HardwareRotator()
+        r.rotate_ccw()
+        r.close()
+    elif args.toggle_osk:
+        mgr = TabletModeManager()
+        mgr.toggle_osk()
+    else:
+        run_daemon()
+
+
+if __name__ == "__main__":
+    main()

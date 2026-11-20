@@ -1,0 +1,12 @@
+[Unit]
+Description=Surface Pro X Qualcomm QMI Hardware GPS NMEA Socket Bridge
+After=qrtr-ns.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/surface-qmi-gps-daemon.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
