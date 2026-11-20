@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Surface Slim Pen Screen-Contact Bluetooth Auto-Connect Daemon (experimental).
+Surface Slim Pen Screen-Contact Bluetooth Auto-Connect Daemon.
 
 Passively observes IPTSD stylus screen-contact events via evdev (zero uinput
-devices created) and triggers BlueZ Device1.Connect() over D-Bus.
+devices created) and triggers BlueZ Device1.Connect() over D-Bus if the paired
+Surface Pen is not already connected via kernel LE Accept-List auto-connect.
 
 Configuration:
   - Set SURFACE_PEN_MAC="AA:BB:CC:DD:EE:FF" in the environment, OR
-  - Leave unset to auto-discover any paired BlueZ device named "Surface Slim Pen"
-    or "Surface Pen".
+  - Leave unset to auto-discover any paired BlueZ device matching "Surface*Pen".
 """
 
 import os
@@ -24,8 +24,11 @@ running = True
 ADAPTER_PATH = "/org/bluez/hci0"
 
 bus = None
+target_path = None
 pen_device = None
 props_iface = None
+connect_lock = threading.Lock()
+is_connecting = False
 last_connect_time = 0.0
 
 
@@ -36,6 +39,13 @@ def handle_sig(sig, frame):
 
 signal.signal(signal.SIGTERM, handle_sig)
 signal.signal(signal.SIGINT, handle_sig)
+
+
+def reset_dbus():
+    global target_path, pen_device, props_iface
+    target_path = None
+    pen_device = None
+    props_iface = None
 
 
 def discover_target_path(sys_bus):
@@ -57,47 +67,85 @@ def discover_target_path(sys_bus):
     return None
 
 
-def init_dbus():
-    global bus, pen_device, props_iface
+def ensure_dbus():
+    global bus, target_path, pen_device, props_iface
+    if pen_device is not None and props_iface is not None:
+        return True
     try:
-        bus = dbus.SystemBus()
-        target_path = discover_target_path(bus)
-        if not target_path:
-            return
-        pen_obj = bus.get_object("org.bluez", target_path)
+        if bus is None:
+            bus = dbus.SystemBus()
+        path = discover_target_path(bus)
+        if not path:
+            return False
+        pen_obj = bus.get_object("org.bluez", path)
         pen_device = dbus.Interface(pen_obj, "org.bluez.Device1")
         props_iface = dbus.Interface(pen_obj, "org.freedesktop.DBus.Properties")
+        target_path = path
         print(f"Bound to paired Surface Pen at {target_path}", flush=True)
+        return True
     except Exception as exc:
+        reset_dbus()
         print(f"D-Bus init deferred: {exc}", flush=True)
+        return False
 
 
 def auto_connect():
-    global last_connect_time
-    now = time.time()
-    if now - last_connect_time < 15.0:
-        return
+    global last_connect_time, is_connecting
 
-    if not props_iface or not pen_device:
-        init_dbus()
-    if not props_iface or not pen_device:
+    now = time.monotonic()
+    with connect_lock:
+        if is_connecting or (now - last_connect_time) < 15.0:
+            return
+
+    if not ensure_dbus():
         return
 
     try:
-        if not props_iface.Get("org.bluez.Device1", "Connected"):
-            last_connect_time = now
-            print("Pen contact detected; requesting Bluetooth connection...", flush=True)
-
-            def worker():
-                try:
-                    pen_device.Connect()
-                    print("Surface Pen connected via Bluetooth.", flush=True)
-                except Exception as err:
-                    print(f"Bluetooth connect result: {err}", flush=True)
-
-            threading.Thread(target=worker, daemon=True).start()
+        connected = bool(props_iface.Get("org.bluez.Device1", "Connected"))
+    except dbus.DBusException as exc:
+        print(f"BlueZ proxy invalidated ({exc}); rebinding...", flush=True)
+        reset_dbus()
+        if not ensure_dbus():
+            return
+        try:
+            connected = bool(props_iface.Get("org.bluez.Device1", "Connected"))
+        except Exception as retry_exc:
+            print(f"Error checking Bluetooth state: {retry_exc}", flush=True)
+            reset_dbus()
+            return
     except Exception as exc:
         print(f"Error checking Bluetooth state: {exc}", flush=True)
+        return
+
+    if connected:
+        return
+
+    with connect_lock:
+        if is_connecting:
+            return
+        is_connecting = True
+        last_connect_time = now
+
+    dev = pen_device
+    print("Pen contact detected; requesting Bluetooth connection...", flush=True)
+
+    def worker():
+        global is_connecting
+        try:
+            dev.Connect(timeout=10)
+            print("Surface Pen connected via Bluetooth.", flush=True)
+        except dbus.DBusException as err:
+            err_name = err.get_dbus_name() or ""
+            if "ServiceUnknown" in err_name or "UnknownObject" in err_name:
+                reset_dbus()
+            print(f"Bluetooth connect result: {err}", flush=True)
+        except Exception as err:
+            print(f"Bluetooth connect result: {err}", flush=True)
+        finally:
+            with connect_lock:
+                is_connecting = False
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def find_stylus():
@@ -106,13 +154,14 @@ def find_stylus():
             dev = evdev.InputDevice(path)
             if "IPTSD" in dev.name and "Stylus" in dev.name:
                 return dev
-        except Exception:
+            dev.close()
+        except OSError:
             pass
     return None
 
 
 def main():
-    init_dbus()
+    ensure_dbus()
     print("Surface Pen Screen-Contact Auto-Connector initialized (Pure D-Bus, zero uinput).", flush=True)
 
     while running:
@@ -122,6 +171,7 @@ def main():
             continue
 
         print(f"Listening for screen contact on: {stylus.name} ({stylus.path})", flush=True)
+
         try:
             while running:
                 r, _, _ = select.select([stylus.fd], [], [], 1.0)
@@ -131,8 +181,13 @@ def main():
                     for event in stylus.read():
                         if event.type == e.EV_KEY and event.code in (e.BTN_TOOL_PEN, e.BTN_TOUCH) and event.value == 1:
                             auto_connect()
-        except (OSError, evdev.device.InputDeviceError):
+        except OSError:
             time.sleep(1)
+        finally:
+            try:
+                stylus.close()
+            except OSError:
+                pass
 
     print("Shutting down cleanly.", flush=True)
 

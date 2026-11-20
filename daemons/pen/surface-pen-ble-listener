@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-Surface Slim Pen BLE Auto-Connect Daemon (experimental / best-effort).
+Surface Slim Pen BLE Auto-Connect Daemon (legacy / optional).
 
-Listens for BLE advertisements from a paired Surface Pen and triggers BlueZ
-Device1.Connect() when the tail button wakes the pen.
+NOTE: On modern BlueZ (5.87+) + Linux 7.3, WCN3998 already arms kernel LE
+Accept-List + IRK Resolving-List auto-connect natively for paired HoG devices.
+Keeping Adapter1.StartDiscovery() open continuously suspends that native
+hardware passive scan, so leave this service disabled unless needed on older
+BlueZ stacks. See linux-surface/linux-surface#1656 for Slim Pen 2 firmware
+idle-disconnect (0x13) behavior.
 
 Configuration:
   - Set SURFACE_PEN_MAC="AA:BB:CC:DD:EE:FF" in the environment, OR
