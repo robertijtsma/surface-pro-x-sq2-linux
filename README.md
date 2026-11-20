@@ -28,6 +28,18 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 | **Suspend (`S2idle` / `S3`)** | Not working | Disabled via `surface-no-deep-suspend.conf`; lid close uses screen-off + session lock + `power-saver` |
 | **Hardware Video Decode (`Venus`)** | Disabled | `LIBVA_DRIVER_NAME=none` in desktop environment to avoid browser stability issues |
 
+## Upstream `linux-surface/surface-pro-x` Issues Addressed
+
+| Upstream Issue | Topic | Solution in This Repository |
+|---|---|---|
+| [`#56`](https://github.com/linux-surface/surface-pro-x/issues/56) | **All 3 Cameras (`OV5693`, `OV13858`, `OV7251`), LEDs & IR Face ID** | [`patches/0001..0004`](patches/), [`dts/sc8180x-surface-pro-x-sq2-cameras.dtsi`](dts/sc8180x-surface-pro-x-sq2-cameras.dtsi), [`drivers/surface_cam_spmi/`](drivers/surface_cam_spmi/), [`libcamera/`](libcamera/), [`faceid/`](faceid/) |
+| [`#32`](https://github.com/linux-surface/surface-pro-x/issues/32) | **Touchscreen (`spi-hid`) intermittently fails on boot (`0x0`/`0xff` sync header `-22`)** | [`patches/0006-hid-spi-hid-fix-cold-boot-reset-and-d0-ready-race.patch`](patches/0006-hid-spi-hid-fix-cold-boot-reset-and-d0-ready-race.patch), [`drivers/spi_hid/`](drivers/spi_hid/) |
+| [`#37`](https://github.com/linux-surface/surface-pro-x/issues/37) | **TrEE / Qualcomm QSEE Firmware TPM 2.0 (`MSFT0101`)** | [`drivers/tpm_qcom_qsee/`](drivers/tpm_qcom_qsee/) (`/dev/tpm0`, `/dev/tpmrm0`, `tpm-rng-0`) |
+| [`#38`](https://github.com/linux-surface/surface-pro-x/issues/38) | **Support for Sensors (IMU Auto-Rotation, Compass, Ambient Light, Lid)** | [`dts/sc8180x-surface-pro-x-sq2-slpi.dtsi`](dts/sc8180x-surface-pro-x-sq2-slpi.dtsi), [`drivers/spx_tcs3430/`](drivers/spx_tcs3430/), [`dts/sc8180x-surface-pro-x-sq2-lid.dtsi`](dts/sc8180x-surface-pro-x-sq2-lid.dtsi) |
+| [`#39`](https://github.com/linux-surface/surface-pro-x/issues/39) | **Support for GNSS / GPS** | [`daemons/gps/surface-gps-nmea.py`](daemons/gps/surface-gps-nmea.py) (QRTR QMI LOC v2 → NMEA socket) |
+| [`#42`](https://github.com/linux-surface/surface-pro-x/issues/42) | **`ath10k` Wi-Fi / MPSS QMI cold-boot race** | [`daemons/wifi-qrtr/10-modem-preboot.conf`](daemons/wifi-qrtr/10-modem-preboot.conf) |
+| [`#51`](https://github.com/linux-surface/surface-pro-x/issues/51) | **Display / DPU / USB-C DisplayPort Alt Mode & Adreno 685 GMEM/HWCG** | [`patches/0005`](patches/0005-platform-surface-aggregator-registry-spx-usc.patch), [`patches/0007`](patches/0007-drm-msm-a680-gmem-hwcg-mmio-and-dpu-dp-fixes.patch), [`drivers/surface_typec/`](drivers/surface_typec/), [`dts/sc8180x-surface-pro-x-sq2-typec-dp.dtsi`](dts/sc8180x-surface-pro-x-sq2-typec-dp.dtsi) |
+
 ## Key Technical Highlights
 
 - **All 3 cameras + all 3 hardware LEDs verified end-to-end (20/20 frames each)**:
