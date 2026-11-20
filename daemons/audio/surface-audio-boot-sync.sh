@@ -71,50 +71,46 @@ apply_hardware_boost() {
 
 release_greeter_alsa() {
     # Prevent gdm/gdm-greeter PipeWire from holding hw:SurfaceProX,0 open (EBUSY)
-    # when a real desktop user session is logged in.
+    # when a real desktop user session logs in.
     local u uid
     for u in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}'); do
         uid=$(id -u "$u" 2>/dev/null || true)
         if [[ "$u" == gdm* ]] || { [ -n "$uid" ] && [ "$uid" -ge 60000 ]; }; then
             if [ -n "$uid" ] && [ -d "/run/user/$uid" ]; then
-                sudo -u "$u" XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user stop wireplumber pipewire.socket pipewire >/dev/null 2>&1 || true
+                runuser -u "$u" -- env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user stop wireplumber pipewire.socket pipewire >/dev/null 2>&1 || true
             fi
         fi
     done
 }
 
 ensure_wireplumber_levels() {
-    local has_real_user=0
+    local set_vol="${1:-0}"
     local u uid
-    for u in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}'); do
-        uid=$(id -u "$u" 2>/dev/null || true)
-        if [ -n "$uid" ] && [ "$uid" -ge 1000 ] && [ "$uid" -lt 60000 ] && [[ "$u" != gdm* ]]; then
-            has_real_user=1
-            break
-        fi
-    done
-
-    if [ "$has_real_user" -eq 1 ]; then
-        release_greeter_alsa
-    fi
+    release_greeter_alsa
 
     for u in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}'); do
         uid=$(id -u "$u" 2>/dev/null || true)
         if [ -z "$uid" ] || [ "$uid" -lt 1000 ] || [ "$uid" -ge 60000 ] || [[ "$u" == gdm* ]]; then
             continue
         fi
-        if [ -d "/run/user/$uid" ]; then
+        if [ -d "/run/user/$uid" ] && [ -S "/run/user/$uid/pipewire-0" ]; then
+            if [ "$set_vol" != "1" ] && [ -e "/run/surface-audio-user-$uid.ready" ]; then
+                continue
+            fi
             local spk_id
-            spk_id=$(sudo -u "$u" XDG_RUNTIME_DIR="/run/user/$uid" wpctl status 2>/dev/null | grep -iE "Speaker|Intern geluid" | grep -oE "[0-9]+" | head -n 1 || true)
+            spk_id=$(runuser -u "$u" -- env XDG_RUNTIME_DIR="/run/user/$uid" wpctl status 2>/dev/null | grep -iE "Speakers" | grep -oE "[0-9]+" | head -n 1 || true)
             if [ -z "$spk_id" ]; then
                 # Real desktop user fell back to Dummy Output (e.g. GDM greeter EBUSY race on fast login); restart WirePlumber
                 release_greeter_alsa
-                sudo -u "$u" XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user restart wireplumber >/dev/null 2>&1 || true
+                runuser -u "$u" -- env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user restart wireplumber >/dev/null 2>&1 || true
                 sleep 1.5
-                spk_id=$(sudo -u "$u" XDG_RUNTIME_DIR="/run/user/$uid" wpctl status 2>/dev/null | grep -iE "Speaker|Intern geluid" | grep -oE "[0-9]+" | head -n 1 || true)
+                spk_id=$(runuser -u "$u" -- env XDG_RUNTIME_DIR="/run/user/$uid" wpctl status 2>/dev/null | grep -iE "Speakers" | grep -oE "[0-9]+" | head -n 1 || true)
             fi
             if [ -n "$spk_id" ]; then
-                sudo -u "$u" XDG_RUNTIME_DIR="/run/user/$uid" wpctl set-volume "$spk_id" 1.0 >/dev/null 2>&1 || true
+                if [ "$set_vol" = "1" ] || [ ! -e "/run/surface-audio-user-$uid.ready" ]; then
+                    runuser -u "$u" -- env XDG_RUNTIME_DIR="/run/user/$uid" wpctl set-volume "$spk_id" 1.0 >/dev/null 2>&1 || true
+                fi
+                touch "/run/surface-audio-user-$uid.ready" 2>/dev/null || true
             fi
         fi
     done
@@ -130,6 +126,7 @@ do_recovery() {
     fi
     trap 'flock -u 9 2>/dev/null || true; exec 9>&- 2>/dev/null || true' RETURN
     echo "surface-audio: Starting audio hardware sync and recovery sequence..."
+    rm -f /run/surface-audio-user-*.ready 2>/dev/null || true
 
     # 1. Ensure SQ2 LDO14E XOB speaker rail module is loaded
     if ! lsmod | grep -q "^surface_ldoe14_xob"; then
@@ -198,12 +195,12 @@ do_recovery() {
             continue
         fi
         if [ -d "/run/user/$uid" ]; then
-            sudo -u "$u" XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user restart pipewire wireplumber >/dev/null 2>&1 || true
+            runuser -u "$u" -- env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user restart pipewire wireplumber >/dev/null 2>&1 || true
         fi
     done
 
     sleep 2
-    ensure_wireplumber_levels
+    ensure_wireplumber_levels 1
 
     echo "surface-audio: Hardware sync and recovery complete."
     flock -u 9 2>/dev/null || true
@@ -225,14 +222,19 @@ case "${1:-}" in
         exit 0
         ;;
     --watchdog)
-        echo "surface-audio: Watchdog started (20s interval, initial delay 60s)..."
-        sleep 60
+        echo "surface-audio: Watchdog started (fast login guard for 60s, then 20s interval)..."
+        for _ in $(seq 1 20); do
+            if [ ! -e /run/surface-audio-recovery.lock ] || flock -n /run/surface-audio-recovery.lock true 2>/dev/null; then
+                ensure_wireplumber_levels 0 || true
+            fi
+            sleep 3
+        done
         while true; do
             if ! check_health; then
                 echo "surface-audio: Anomaly detected; triggering recovery..."
                 do_recovery || true
             else
-                ensure_wireplumber_levels || true
+                ensure_wireplumber_levels 0 || true
             fi
             sleep 20
         done
@@ -240,7 +242,7 @@ case "${1:-}" in
     *)
         if check_health; then
             apply_hardware_boost
-            ensure_wireplumber_levels
+            ensure_wireplumber_levels 1
             echo "surface-audio: Audio healthy; boost and mixer verified."
             exit 0
         else
