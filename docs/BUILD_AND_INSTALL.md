@@ -31,6 +31,10 @@ make -C drivers/surface_cam_spmi && sudo make -C drivers/surface_cam_spmi instal
 # SQ2 LDO14E XOB speaker amplifier rail (avoids RPMh VRM TCS hang)
 make -C drivers/surface_ldoe14_xob && sudo make -C drivers/surface_ldoe14_xob install
 
+# Qualcomm QSEE fTPM 2.0 transport (/dev/tpm0, /dev/tpmrm0, tpm-rng-0)
+make -C drivers/tpm_qcom_qsee && sudo make -C drivers/tpm_qcom_qsee install
+sudo cp configs/modules-load.d/surface-tpm.conf /etc/modules-load.d/
+
 # Optional: live Y10 S_FMT hook only if running an unpatched qcom-camss
 # make -C drivers/surface_ir_sfmt && sudo make -C drivers/surface_ir_sfmt install
 ```

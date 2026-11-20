@@ -22,6 +22,7 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 | **Type Cover, Posture & Lid Handling** | Working | SAM posture daemon (`closed`/`laptop`/`tablet`), eDP blank + lock on close (`daemons/posture/surface-lid-daemon.sh`) |
 | **CPU Power Profiles (`SC8180X`)** | Working | Native UPower/hadess D-Bus `PowerProfiles` manager (`daemons/power/surface-power-profile`) |
 | **Hardware GNSS (`QMI LOC`)** | Working | On-demand QRTR QMI LOC → NMEA Unix socket bridge (`/run/surface-gps.sock`) |
+| **Hardware TPM 2.0 (`QSEE fTPM`)** | Working | `tpm_qcom_qsee` QSEECOM transport (`drivers/tpm_qcom_qsee/`); `/dev/tpm0`, `/dev/tpmrm0`, `tpm-rng-0`, SHA-1/256/384 PCR banks |
 | **Suspend (`S2idle` / `S3`)** | Not working | Disabled via `surface-no-deep-suspend.conf`; lid close uses screen-off + session lock + `power-saver` |
 | **Hardware Video Decode (`Venus`)** | Disabled | `LIBVA_DRIVER_NAME=none` in desktop environment to avoid browser stability issues |
 
@@ -42,7 +43,7 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 ```text
 patches/    Clean Linux v7.3 patches (ov13858, ov7251, portable camss LEDs/RDI, full SC8180X camss)
 dts/        Symbolic SC8180X SQ2 camera DTSI + raw reference diff against audio-only base DTB
-drivers/    Out-of-tree kernel modules (surface_cam_spmi, surface_ldoe14_xob, surface_ir_sfmt)
+drivers/    Out-of-tree kernel modules (surface_cam_spmi, surface_ldoe14_xob, tpm_qcom_qsee, surface_ir_sfmt)
 libcamera/  Symmetric DebayerEGL IPA YAMLs, WirePlumber rules, Adreno 685 env configs
 faceid/     Howdy PAM/CLI single-thread wrappers, OV7251 config.ini.example, PAM guide
 scripts/    Camera boot loader, media-ctl topology script, GTK4/Libadwaita camera control panel
