@@ -1,0 +1,216 @@
+diff --git a/drivers/clk/qcom/dispcc-sm8250.c b/drivers/clk/qcom/dispcc-sm8250.c
+index fdc0732..9d1e405 100644
+--- a/drivers/clk/qcom/dispcc-sm8250.c
++++ b/drivers/clk/qcom/dispcc-sm8250.c
+@@ -564,7 +564,7 @@ static struct clk_rcg2 disp_cc_mdss_mdp_clk_src = {
+ 		.parent_data = disp_cc_parent_data_5,
+ 		.num_parents = ARRAY_SIZE(disp_cc_parent_data_5),
+ 		.flags = CLK_SET_RATE_PARENT,
+-		.ops = &clk_rcg2_shared_ops,
++		.ops = &clk_rcg2_shared_no_init_park_ops,
+ 	},
+ };
+ 
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_catalog.c b/drivers/gpu/drm/msm/adreno/a6xx_catalog.c
+index be10222..e85c42d 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_catalog.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_catalog.c
+@@ -450,6 +450,57 @@ static const struct adreno_reglist a660_hwcg[] = {
+ 	{},
+ };
+ 
++static const struct adreno_reglist a680_hwcg[] = {
++	{REG_A6XX_RBBM_CLOCK_CNTL_SP0, 0x02222222},
++	{REG_A6XX_RBBM_CLOCK_CNTL2_SP0, 0x02222220},
++	{REG_A6XX_RBBM_CLOCK_DELAY_SP0, 0x00000080},
++	{REG_A6XX_RBBM_CLOCK_HYST_SP0, 0x0000F3CF},
++	{REG_A6XX_RBBM_CLOCK_CNTL_TP0, 0x22222222},
++	{REG_A6XX_RBBM_CLOCK_CNTL2_TP0, 0x22222222},
++	{REG_A6XX_RBBM_CLOCK_CNTL3_TP0, 0x22222222},
++	{REG_A6XX_RBBM_CLOCK_CNTL4_TP0, 0x00022222},
++	{REG_A6XX_RBBM_CLOCK_DELAY_TP0, 0x11111111},
++	{REG_A6XX_RBBM_CLOCK_DELAY2_TP0, 0x11111111},
++	{REG_A6XX_RBBM_CLOCK_DELAY3_TP0, 0x11111111},
++	{REG_A6XX_RBBM_CLOCK_DELAY4_TP0, 0x00011111},
++	{REG_A6XX_RBBM_CLOCK_HYST_TP0, 0x00000000},
++	{REG_A6XX_RBBM_CLOCK_HYST2_TP0, 0x00000000},
++	{REG_A6XX_RBBM_CLOCK_HYST3_TP0, 0x00000000},
++	{REG_A6XX_RBBM_CLOCK_HYST4_TP0, 0x00000000},
++	{REG_A6XX_RBBM_CLOCK_CNTL_RB0, 0x22222222},
++	{REG_A6XX_RBBM_CLOCK_CNTL2_RB0, 0x01002222},
++	{REG_A6XX_RBBM_CLOCK_CNTL_CCU0, 0x00002220},
++	{REG_A6XX_RBBM_CLOCK_HYST_RB_CCU0, 0x00040F00},
++	{REG_A6XX_RBBM_CLOCK_CNTL_RAC, 0x05222022},
++	{REG_A6XX_RBBM_CLOCK_CNTL2_RAC, 0x00005555},
++	{REG_A6XX_RBBM_CLOCK_DELAY_RAC, 0x00000011},
++	{REG_A6XX_RBBM_CLOCK_HYST_RAC, 0x00445044},
++	{REG_A6XX_RBBM_CLOCK_CNTL_TSE_RAS_RBBM, 0x04222222},
++	{REG_A6XX_RBBM_CLOCK_MODE_VFD, 0x00002222},
++	{REG_A6XX_RBBM_CLOCK_MODE_GPC, 0x00222222},
++	{REG_A6XX_RBBM_CLOCK_DELAY_HLSQ_2, 0x00000002},
++	{REG_A6XX_RBBM_CLOCK_MODE_HLSQ, 0x00002222},
++	{REG_A6XX_RBBM_CLOCK_DELAY_TSE_RAS_RBBM, 0x00004000},
++	{REG_A6XX_RBBM_CLOCK_DELAY_VFD, 0x00002222},
++	{REG_A6XX_RBBM_CLOCK_DELAY_GPC, 0x00000200},
++	{REG_A6XX_RBBM_CLOCK_DELAY_HLSQ, 0x00000000},
++	{REG_A6XX_RBBM_CLOCK_HYST_TSE_RAS_RBBM, 0x00000000},
++	{REG_A6XX_RBBM_CLOCK_HYST_VFD, 0x00000000},
++	{REG_A6XX_RBBM_CLOCK_HYST_GPC, 0x04104004},
++	{REG_A6XX_RBBM_CLOCK_HYST_HLSQ, 0x00000000},
++	{REG_A6XX_RBBM_CLOCK_CNTL_UCHE, 0x22222222},
++	{REG_A6XX_RBBM_CLOCK_HYST_UCHE, 0x00000004},
++	{REG_A6XX_RBBM_CLOCK_DELAY_UCHE, 0x00000002},
++	{REG_A6XX_RBBM_CLOCK_CNTL, 0x8AA8AA82},
++	{REG_A6XX_RBBM_ISDB_CNT, 0x00000182},
++	{REG_A6XX_RBBM_RAC_THRESHOLD_CNT, 0x00000000},
++	{REG_A6XX_RBBM_SP_HYST_CNT, 0x00000000},
++	{REG_A6XX_RBBM_CLOCK_CNTL_GMU_GX, 0x00000222},
++	{REG_A6XX_RBBM_CLOCK_DELAY_GMU_GX, 0x00000111},
++	{REG_A6XX_RBBM_CLOCK_HYST_GMU_GX, 0x00000555},
++	{},
++};
++
+ static const struct adreno_reglist a690_hwcg[] = {
+ 	{REG_A6XX_RBBM_CLOCK_CNTL_SP0, 0x02222222},
+ 	{REG_A6XX_RBBM_CLOCK_CNTL2_SP0, 0x02222220},
+@@ -1105,7 +1156,7 @@ static const struct adreno_info a6xx_gpus[] = {
+ 		.funcs = &a6xx_gpu_funcs,
+ 		.zapfw = "a640_zap.mdt",
+ 		.a6xx = &(const struct a6xx_info) {
+-			.hwcg = a640_hwcg,
++			.hwcg = a680_hwcg,
+ 			.protect = &a630_protect,
+ 			.gbif_cx = a640_gbif,
+ 			.gmu_cgc_mode = 0x00020202,
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gpu.c b/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
+index c54da29..cf55764 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
+@@ -710,8 +710,12 @@ static void a6xx_set_hwcg(struct msm_gpu *gpu, bool state)
+ 	if (!adreno_is_a610_family(adreno_gpu) && !adreno_is_a7xx(adreno_gpu))
+ 		gmu_rmw(gmu, REG_A6XX_GPU_GMU_GX_SPTPRAC_CLOCK_CONTROL, 1, 0);
+ 
+-	for (i = 0; (reg = &adreno_gpu->info->a6xx->hwcg[i], reg->offset); i++)
+-		gpu_write(gpu, reg->offset, state ? reg->value : 0);
++	for (i = 0; (reg = &adreno_gpu->info->a6xx->hwcg[i], reg->offset); i++) {
++		if (gmu->mmio && (reg->offset << 2) >= gmu->mmio_offset)
++			gmu_write(gmu, reg->offset, state ? reg->value : 0);
++		else
++			gpu_write(gpu, reg->offset, state ? reg->value : 0);
++	}
+ 
+ 	/* Enable SP clock */
+ 	if (!adreno_is_a610_family(adreno_gpu) && !adreno_is_a7xx(adreno_gpu))
+@@ -1281,8 +1285,11 @@ static int hw_init(struct msm_gpu *gpu)
+ 	if (!(adreno_is_a650_family(adreno_gpu) ||
+ 	      adreno_is_a702(adreno_gpu) ||
+ 	      adreno_is_a730(adreno_gpu))) {
+-		gmem_range_min = (adreno_is_a740_family(adreno_gpu) ||
+-				  adreno_is_a722(adreno_gpu)) ? SZ_16M : SZ_1M;
++		gmem_range_min = SZ_1M;
++		if (adreno_is_a740_family(adreno_gpu) || adreno_is_a722(adreno_gpu))
++			gmem_range_min = SZ_16M;
++		else if (adreno_is_a680(adreno_gpu))
++			gmem_range_min = 0;
+ 
+ 		/* Set the GMEM VA range [0x100000:0x100000 + gpu->gmem - 1] */
+ 		gpu_write64(gpu, REG_A6XX_UCHE_GMEM_RANGE_MIN, gmem_range_min);
+diff --git a/drivers/gpu/drm/msm/adreno/adreno_gpu.c b/drivers/gpu/drm/msm/adreno/adreno_gpu.c
+index 5832dc2..beddba6 100644
+--- a/drivers/gpu/drm/msm/adreno/adreno_gpu.c
++++ b/drivers/gpu/drm/msm/adreno/adreno_gpu.c
+@@ -382,7 +382,8 @@ int adreno_get_param(struct msm_gpu *gpu, struct msm_context *ctx,
+ 		*value = adreno_gpu->info->gmem;
+ 		return 0;
+ 	case MSM_PARAM_GMEM_BASE:
+-		if (adreno_gpu->info->family >= ADRENO_6XX_GEN3)
++		if (adreno_gpu->info->family >= ADRENO_6XX_GEN3 ||
++		    adreno_is_a680(adreno_gpu))
+ 			*value = 0;
+ 		else
+ 			*value = 0x100000;
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c
+index 42d0a52..81282a8 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c
+@@ -1037,6 +1037,19 @@ static int _dpu_crtc_wait_for_frame_done(struct drm_crtc *crtc)
+ 	return rc;
+ }
+ 
++/* Must precede the kickoff: the frame-done can be handled before it returns. */
++static void dpu_crtc_count_pending_frame(struct drm_crtc *crtc)
++{
++	struct dpu_crtc *dpu_crtc = to_dpu_crtc(crtc);
++
++	if (atomic_inc_return(&dpu_crtc->frame_pending) == 1) {
++		/* acquire bandwidth and other resources */
++		DRM_DEBUG_ATOMIC("crtc%d first commit\n", crtc->base.id);
++	} else {
++		DRM_DEBUG_ATOMIC("crtc%d commit\n", crtc->base.id);
++	}
++}
++
+ static int dpu_crtc_kickoff_clone_mode(struct drm_crtc *crtc)
+ {
+ 	struct drm_encoder *encoder;
+@@ -1062,6 +1075,8 @@ static int dpu_crtc_kickoff_clone_mode(struct drm_crtc *crtc)
+ 
+ 	dpu_vbif_clear_errors(dpu_kms);
+ 
++	dpu_crtc_count_pending_frame(crtc);
++
+ 	/*
+ 	 * Kickoff real time encoder last as it's the encoder that
+ 	 * will do the flush
+@@ -1119,6 +1134,8 @@ void dpu_crtc_commit_kickoff(struct drm_crtc *crtc)
+ 
+ 		dpu_vbif_clear_errors(dpu_kms);
+ 
++		dpu_crtc_count_pending_frame(crtc);
++
+ 		drm_for_each_encoder_mask(encoder, crtc->dev,
+ 				crtc->state->encoder_mask) {
+ 			dpu_encoder_kickoff(encoder);
+@@ -1126,12 +1143,6 @@ void dpu_crtc_commit_kickoff(struct drm_crtc *crtc)
+ 		}
+ 	}
+ 
+-	if (atomic_inc_return(&dpu_crtc->frame_pending) == 1) {
+-		/* acquire bandwidth and other resources */
+-		DRM_DEBUG_ATOMIC("crtc%d first commit\n", crtc->base.id);
+-	} else
+-		DRM_DEBUG_ATOMIC("crtc%d commit\n", crtc->base.id);
+-
+ 	dpu_crtc->play_count++;
+ 
+ 	reinit_completion(&dpu_crtc->frame_done_comp);
+diff --git a/drivers/gpu/drm/msm/dp/dp_display.c b/drivers/gpu/drm/msm/dp/dp_display.c
+index 4dcbd9b..eceeac2 100644
+--- a/drivers/gpu/drm/msm/dp/dp_display.c
++++ b/drivers/gpu/drm/msm/dp/dp_display.c
+@@ -896,6 +896,7 @@ enum drm_connector_status msm_dp_bridge_detect(struct drm_bridge *bridge,
+ 	u8 dpcd[DP_RECEIVER_CAP_SIZE];
+ 	struct drm_dp_desc desc;
+ 	bool phy_deinit;
++	bool was_plugged;
+ 	int ret;
+ 
+ 	dp = to_dp_bridge(bridge)->msm_dp_display;
+@@ -909,6 +910,7 @@ enum drm_connector_status msm_dp_bridge_detect(struct drm_bridge *bridge,
+ 		return status;
+ 	}
+ 
++	was_plugged = priv->plugged;
+ 	phy_deinit = msm_dp_display_host_phy_init(priv);
+ 
+ 	msm_dp_aux_enable_xfers(priv->aux, true);
+@@ -961,6 +963,9 @@ enum drm_connector_status msm_dp_bridge_detect(struct drm_bridge *bridge,
+ 		pm_runtime_put_sync(&dp->pdev->dev);
+ 	}
+ 
++	if (was_plugged)
++		pm_runtime_put_sync(&dp->pdev->dev);
++
+ 	return status;
+ }
+ 

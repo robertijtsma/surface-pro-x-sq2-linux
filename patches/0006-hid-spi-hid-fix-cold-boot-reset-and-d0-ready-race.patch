@@ -1,0 +1,230 @@
+--- a/drivers/hid/spi-hid/spi-hid-core.c
++++ b/drivers/hid/spi-hid/spi-hid-core.c
+@@ -49,9 +49,8 @@
+ 
+ #include "spi-hid-core.h"
+ #include "spi-hid_trace.h"
+-#include "../hid-ids.h"
+ 
+-#define SPI_HID_MAX_RESET_ATTEMPTS 3
++#define SPI_HID_MAX_RESET_ATTEMPTS 5
+ 
+ static struct hid_ll_driver spi_hid_ll_driver;
+ 
+@@ -498,7 +497,7 @@
+ 
+ 	mutex_unlock(&shid->lock);
+ 	ret = wait_for_completion_interruptible_timeout(&shid->output_done,
+-			msecs_to_jiffies(1000));
++			msecs_to_jiffies(2000));
+ 	mutex_lock(&shid->lock);
+ 	if (ret == 0) {
+ 		dev_err(dev, "response timed out\n");
+@@ -686,7 +685,6 @@
+ 	struct spi_hid *shid =
+ 		container_of(work, struct spi_hid, create_device_work);
+ 	struct device *dev = &shid->spi->dev;
+-	u8 prev_state = shid->power_state;
+ 	int ret;
+ 
+ 	trace_spi_hid_create_device_work(shid);
+@@ -708,25 +706,8 @@
+ 	}
+ 
+ 	shid->attempts = 0;
+-	if (shid->irq_enabled) {
+-		disable_irq(shid->spi->irq);
+-		shid->irq_enabled = false;
+-	} else {
+-		dev_err(dev, "%s called with interrupt already disabled\n",
+-								__func__);
+-		shid->logic_error_count++;
+-		shid->logic_last_error = -ENOEXEC;
+-	}
+-	ret = spi_hid_power_down(shid);
+-	if (ret) {
+-		dev_err(dev, "%s: could not power down\n", __func__);
+-		return;
+-	}
+-
+-	shid->power_state = SPI_HID_POWER_MODE_OFF;
+-	dev_err(dev, "%s: %s -> %s\n", __func__,
+-			spi_hid_power_mode_string(prev_state),
+-			spi_hid_power_mode_string(shid->power_state));
++	shid->ready = true;
++	sysfs_notify(&dev->kobj, NULL, "ready");
+ }
+ 
+ static void spi_hid_refresh_device_work(struct work_struct *work)
+@@ -891,6 +872,15 @@
+ 						false);
+ 		shid->bus_error_count++;
+ 		shid->bus_last_error = ret;
++		if (--shid->input_transfer_pending) {
++			ret = spi_hid_input_async(shid, shid->input.header,
++					sizeof(shid->input.header),
++					spi_hid_input_header_complete);
++			if (ret)
++				dev_err(dev, "failed to restart header --> %d\n", ret);
++		} else if (!shid->ready) {
++			schedule_work(&shid->error_work);
++		}
+ 		goto out;
+ 	}
+ 
+@@ -1029,6 +1019,10 @@
+ 	int ret = 0;
+ 
+ 	spin_lock(&shid->input_lock);
++	if (!shid->powered || shid->power_state == SPI_HID_POWER_MODE_OFF) {
++		spin_unlock(&shid->input_lock);
++		return IRQ_HANDLED;
++	}
+ 	trace_spi_hid_dev_irq(shid, irq);
+ 
+ 	ret = spi_hid_bus_input_report(shid);
+@@ -1080,6 +1074,15 @@
+ 		goto err0;
+ 	}
+ 
++	ret = spi_hid_power_up(shid);
++	if (ret) {
++		dev_err(dev, "%s: could not power up\n", __func__);
++		goto err1;
++	}
++
++	/* Drive reset for at least 100 ms while powered so rails stabilize */
++	msleep(100);
++
+ 	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
+ 	if (!shid->irq_enabled) {
+ 		enable_irq(spi->irq);
+@@ -1091,12 +1094,6 @@
+ 		shid->logic_last_error = -EEXIST;
+ 	}
+ 
+-	ret = spi_hid_power_up(shid);
+-	if (ret) {
+-		dev_err(dev, "%s: could not power up\n", __func__);
+-		goto err1;
+-	}
+-
+ 	ret = spi_hid_deassert_reset(shid);
+ 	if (ret) {
+ 		dev_err(dev, "%s: failed to deassert reset\n", __func__);
+@@ -1110,6 +1107,10 @@
+ 	return 0;
+ 
+ err2:
++	if (shid->irq_enabled) {
++		disable_irq(spi->irq);
++		shid->irq_enabled = false;
++	}
+ 	spi_hid_power_down(shid);
+ 
+ err1:
+@@ -1122,37 +1123,11 @@
+ 
+ static void spi_hid_ll_close(struct hid_device *hid)
+ {
+-	struct spi_device *spi = hid->driver_data;
+-	struct spi_hid *shid = spi_get_drvdata(spi);
+-	struct device *dev = &spi->dev;
+-	u8 prev_state = shid->power_state;
+-	int ret;
+-
+-	if (shid->refresh_in_progress || prev_state == SPI_HID_POWER_MODE_OFF)
+-		return;
+-
+-	if (shid->irq_enabled) {
+-		disable_irq(shid->spi->irq);
+-		shid->irq_enabled = false;
+-	} else {
+-		dev_err(dev, "%s called with interrupt already disabled\n",
+-								__func__);
+-		shid->logic_error_count++;
+-		shid->logic_last_error = -ENOEXEC;
+-	}
+-	shid->ready = false;
+-	sysfs_notify(&dev->kobj, NULL, "ready");
+-	shid->attempts = 0;
+-	ret = spi_hid_power_down(shid);
+-	if (ret) {
+-		dev_err(dev, "%s: could not power down\n", __func__);
+-		return;
+-	}
+-
+-	shid->power_state = SPI_HID_POWER_MODE_OFF;
+-	dev_err(dev, "%s: %s -> %s\n", __func__,
+-			spi_hid_power_mode_string(prev_state),
+-			spi_hid_power_mode_string(shid->power_state));
++	/*
++	 * Keep the SPI HID controller in D0 once initialized so transient
++	 * open/close cycles from udev or hid-generic during boot do not
++	 * power-cycle the touchscreen into D3 right before iptsd opens hidraw.
++	 */
+ }
+ 
+ static int spi_hid_ll_power(struct hid_device *hid, int level)
+@@ -1394,7 +1369,7 @@
+ 	}
+ 
+ 	shid->spi = spi;
+-	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
++	shid->power_state = SPI_HID_POWER_MODE_OFF;
+ 	spi_set_drvdata(spi, shid);
+ 
+ 	ret = sysfs_create_files(&dev->kobj, spi_hid_attributes);
+@@ -1477,14 +1452,6 @@
+ 	INIT_WORK(&shid->refresh_device_work, spi_hid_refresh_device_work);
+ 	INIT_WORK(&shid->error_work, spi_hid_error_work);
+ 
+-	irqflags = irq_get_trigger_type(spi->irq);
+-	ret = request_irq(spi->irq, spi_hid_dev_irq, irqflags,
+-			dev_name(&spi->dev), shid);
+-	if (ret)
+-		goto err1;
+-	else
+-		shid->irq_enabled = true;
+-
+ 	ret = spi_hid_assert_reset(shid);
+ 	if (ret) {
+ 		dev_err(dev, "%s: failed to assert reset\n", __func__);
+@@ -1497,10 +1464,22 @@
+ 		goto err1;
+ 	}
+ 
++	/* Drive reset for at least 100 ms while powered so rails stabilize */
++	msleep(100);
++
++	irqflags = irq_get_trigger_type(spi->irq);
++	ret = request_irq(spi->irq, spi_hid_dev_irq, irqflags,
++			dev_name(&spi->dev), shid);
++	if (ret)
++		goto err2;
++	else
++		shid->irq_enabled = true;
++
++	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
+ 	ret = spi_hid_deassert_reset(shid);
+ 	if (ret) {
+ 		dev_err(dev, "%s: failed to deassert reset\n", __func__);
+-		goto err1;
++		goto err3;
+ 	}
+ 
+ 	dev_err(dev, "%s: d3 -> %s\n", __func__,
+@@ -1508,6 +1487,13 @@
+ 
+ 	return 0;
+ 
++err3:
++	free_irq(spi->irq, shid);
++	shid->irq_enabled = false;
++
++err2:
++	spi_hid_power_down(shid);
++
+ err1:
+ 	sysfs_remove_files(&dev->kobj, spi_hid_attributes);
+ 

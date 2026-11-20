@@ -168,4 +168,21 @@ make -C drivers/surface_typec && sudo make -C drivers/surface_typec install
    - When `mdss_dp0` and `mdss_dp1` are enabled in DT, `msm_dpu` waits for all three DisplayPort sub-components (`ae90000`, `ae98000`, `ae9a000`) before binding the internal eDP panel.
    - If `dispcc_sm8250` and `msm` are included in early `initramfs` (e.g. for Plymouth boot splash), include `surface_aggregator`, `surface_aggregator_registry`, and `surface_typec` before `dispcc_sm8250` and `msm` in `MODULES=(...)` so the DP HPD bridges are registered before `msm_dpu` probes.
 
+## 8. `spi-hid` Cold-Boot Touchscreen Fix & Adreno 685 (`drm/msm`) Fixes
+
+1. **`spi-hid` cold-boot reliability fix (`patches/0006` / `drivers/spi_hid/`)**:
+   - Fixes the `spi-hid` cold-boot race (`linux-surface/surface-pro-x#32`) where a stale TLMM falling-edge latch during `pinctrl_sleep`/`pinctrl_reset` triggers a `00 00 00 00` header read (`-EINVAL`) before `spi_hid_deassert_reset()`, drops the real `RESET_RESP` interrupt, and power-cycles the digitizer into `D3` right as `udev`/`libinput`/`iptsd` open it:
+
+```bash
+make -C drivers/spi_hid && sudo make -C drivers/spi_hid install
+sudo install -m 755 daemons/iptsd/start-surface-iptsd.sh /usr/local/bin/
+sudo install -m 644 systemd/surface-iptsd.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now surface-iptsd.service
+```
+
+2. **Adreno 685 GPU, DPU, DisplayPort & DISPCC fixes (`patches/0007`)**:
+   - Sets `gmem_range_min = 0` and `MSM_PARAM_GMEM_BASE = 0` on Adreno 680/685 (fixing Vulkan GMEM texture corruption), imports the `a680_hwcg` KGSL clock-gating sequence, routes GMU-offset `hwcg[]` entries via `gmu_write()`, counts `frame_pending` before `dpu_encoder_kickoff()`, fixes the DisplayPort runtime-PM reference leak on unplug, and uses `clk_rcg2_shared_no_init_park_ops` on `disp_cc_mdss_mdp_clk_src`.
+
+
 

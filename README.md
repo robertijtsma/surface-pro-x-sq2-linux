@@ -15,9 +15,9 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 | **Stereo Speakers (`WCD934x` + `WSA8815`) & Mics** | Working | `surface_ldoe14_xob` (LDO14E XOB RPMh rail, avoids VRM TCS hang) + SoundWire sync & 8.5 V Smart Boost |
 | **Wi-Fi (`WCN3998` / `ath10k`, 866 Mbps)** | Working | Linux 7.3 `rmtfs.service` QRTR pre-boot drop-in (`daemons/wifi-qrtr/10-modem-preboot.conf`) |
 | **Bluetooth (`WCN3998`)** | Working | Deterministic `btmgmt` public BD_ADDR setup (`daemons/bluetooth/surface-bt-mac.sh`) |
-| **Touchscreen & Slim Pen 2 (IPTS)** | Working | `iptsd` 3.1.1 calibrated MPP2 thresholds (`configs/iptsd/iptsd.conf`), tilt, pressure, side button, palm rejection |
+| **Touchscreen & Slim Pen 2 (IPTS)** | Working | `spi_hid` cold-boot reset/D0 fix (`drivers/spi_hid/`, `patches/0006`) + `iptsd` 3.1.1 calibrated MPP2 thresholds (`configs/iptsd/iptsd.conf`), tilt, pressure, side button, palm rejection |
 | **Slim Pen 2 BLE Auto-Connect** | Experimental | Best-effort BlueZ LE/contact daemons (`daemons/pen/`); core IPTS drawing/hover works independently without BLE |
-| **Display & Adreno 685 GPU** | Working | `eDP` 2880×1920, Freedreno/Turnip with `noubwc` (`libcamera/environment.d/99-surface-gpu.conf`) |
+| **Display & Adreno 685 GPU** | Working | `eDP` 2880×1920, `msm`/`dispcc-sm8250` A680 GMEM=0, KGSL `a680_hwcg` + `gmu_write` MMIO guard (`patches/0007`), Freedreno/Turnip with `noubwc` (`libcamera/environment.d/99-surface-gpu.conf`) |
 | **USB-C Orientation & DisplayPort Alt Mode** | Working | `surface_typec` (`drivers/surface_typec/`) + `patches/0005` SSAM registry + QMP combo PHY `orientation-switch` & `mdss_dp0`/`mdss_dp1` (`card0-DP-1`/`card0-DP-2`) |
 | **Ambient Light Sensor (`TCS3430`)** | Working | Direct `/dev/i2c-0` `0x39` adaptive brightness daemon (`daemons/display/surface-auto-brightness`) |
 | **Accelerometer, Compass & Auto-Rotation (`SLPI`)** | Working | `remoteproc_slpi` + FastRPC (`dts/sc8180x-surface-pro-x-sq2-slpi.dtsi`), `hexagonrpcd`, `libssc`, `iio-sensor-proxy` (`LSM6DSO` + `AK0991x`) |
@@ -43,9 +43,9 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 ## Repository Layout
 
 ```text
-patches/    Clean Linux v7.3 patches (ov13858, ov7251, camss LEDs/RDI, full SC8180X camss, SSAM Type-C registry)
+patches/    Clean Linux v7.3 patches (ov13858, ov7251, camss LEDs/RDI, full SC8180X camss, SSAM Type-C, spi-hid, drm/msm A680)
 dts/        Symbolic SC8180X SQ2 DTSIs (cameras, SLPI, Type-C/DP) + reference diffs
-drivers/    Out-of-tree kernel modules (surface_cam_spmi, surface_ldoe14_xob, tpm_qcom_qsee, surface_typec, surface_ir_sfmt)
+drivers/    Out-of-tree kernel modules (surface_cam_spmi, surface_ldoe14_xob, tpm_qcom_qsee, surface_typec, spi_hid, surface_ir_sfmt)
 libcamera/  Symmetric DebayerEGL IPA YAMLs, WirePlumber rules, Adreno 685 env configs
 faceid/     Howdy PAM/CLI single-thread wrappers, OV7251 config.ini.example, PAM guide
 scripts/    Camera boot loader, media-ctl topology script, GTK4/Libadwaita camera control panel
