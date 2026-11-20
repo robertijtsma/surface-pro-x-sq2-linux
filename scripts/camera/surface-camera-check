@@ -3,12 +3,26 @@ set -euo pipefail
 
 echo "=== Configuring Surface Pro X SQ2 Camera Media Graph (OV5693 / OV13858 / OV7251) ==="
 
-if [ ! -e /dev/media0 ]; then
-    echo "[-] /dev/media0 not found. Camera drivers are not active."
+MEDIA_DEV=""
+for m in /sys/bus/media/devices/media*; do
+    if [ -r "$m/model" ] && [ "$(cat "$m/model" 2>/dev/null || true)" = "Qualcomm Camera Subsystem" ]; then
+        MEDIA_DEV="/dev/$(basename "$m")"
+        break
+    fi
+done
+if [ -z "$MEDIA_DEV" ] || [ ! -e "$MEDIA_DEV" ]; then
+    echo "[-] Qualcomm Camera Subsystem media device not found. Camera drivers are not active."
     exit 1
 fi
 
-MEDIA_DEV="/dev/media0"
+FRONT_DEV="$(media-ctl -d "$MEDIA_DEV" -e msm_vfe0_video0 2>/dev/null || true)"
+REAR_DEV="$(media-ctl -d "$MEDIA_DEV" -e msm_vfe1_video0 2>/dev/null || true)"
+IR_DEV="$(media-ctl -d "$MEDIA_DEV" -e msm_vfe3_video0 2>/dev/null || true)"
+if [ -z "$FRONT_DEV" ] || [ -z "$REAR_DEV" ] || [ -z "$IR_DEV" ] || \
+   [ ! -e "$FRONT_DEV" ] || [ ! -e "$REAR_DEV" ] || [ ! -e "$IR_DEV" ]; then
+    echo "[-] Failed to resolve CAMSS video nodes from $MEDIA_DEV (front=$FRONT_DEV rear=$REAR_DEV ir=$IR_DEV)."
+    exit 1
+fi
 
 # 0. Keep OV7251 and OV13858 out of runtime suspend (OV5693 is resumed below after setting 2592x1944)
 for i2c_dev in 3-0060 3-0010; do
@@ -21,15 +35,15 @@ done
 media-ctl -d "$MEDIA_DEV" -r
 
 # 2. Configure proven physical CSIPHY -> CSID -> VFE RDI0 routes on Surface Pro X SQ2
-# Front RGB 5 MP (ov5693 4-0036 -> csiphy0 -> csid0 -> vfe0_rdi0 -> /dev/video0)
+# Front RGB 5 MP (ov5693 4-0036 -> csiphy0 -> csid0 -> vfe0_rdi0 -> msm_vfe0_video0)
 media-ctl -d "$MEDIA_DEV" -l '"msm_csiphy0":1->"msm_csid0":0[1]'
 media-ctl -d "$MEDIA_DEV" -l '"msm_csid0":1->"msm_vfe0_rdi0":0[1]'
 
-# Rear RGB 13 MP (ov13858 3-0010 -> csiphy2 -> csid1 -> vfe1_rdi0 -> /dev/video4)
+# Rear RGB 13 MP (ov13858 3-0010 -> csiphy2 -> csid1 -> vfe1_rdi0 -> msm_vfe1_video0)
 media-ctl -d "$MEDIA_DEV" -l '"msm_csiphy2":1->"msm_csid1":0[1]'
 media-ctl -d "$MEDIA_DEV" -l '"msm_csid1":1->"msm_vfe1_rdi0":0[1]'
 
-# Front IR VGA (ov7251 3-0060 -> csiphy3 -> csid3 -> vfe3_rdi0 -> /dev/video12)
+# Front IR VGA (ov7251 3-0060 -> csiphy3 -> csid3 -> vfe3_rdi0 -> msm_vfe3_video0)
 media-ctl -d "$MEDIA_DEV" -l '"msm_csiphy3":1->"msm_csid3":0[1]'
 media-ctl -d "$MEDIA_DEV" -l '"msm_csid3":1->"msm_vfe3_rdi0":0[1]'
 
@@ -75,9 +89,9 @@ media-ctl -d "$MEDIA_DEV" -V '"msm_vfe3_rdi0":0[fmt:Y10_2X8_PADHI_LE/640x480]'
 media-ctl -d "$MEDIA_DEV" -V '"msm_vfe3_rdi0":1[fmt:Y10_2X8_PADHI_LE/640x480]'
 
 # 5. Video capture node default formats
-v4l2-ctl -d /dev/video0 --set-fmt-video=width=2592,height=1944,pixelformat=pBAA
-v4l2-ctl -d /dev/video4 --set-fmt-video=width=4224,height=3136,pixelformat=pgAA
-v4l2-ctl -d /dev/video12 --set-fmt-video=width=640,height=480,pixelformat='Y10 '
+v4l2-ctl -d "$FRONT_DEV" --set-fmt-video=width=2592,height=1944,pixelformat=pBAA
+v4l2-ctl -d "$REAR_DEV" --set-fmt-video=width=4224,height=3136,pixelformat=pgAA
+v4l2-ctl -d "$IR_DEV" --set-fmt-video=width=640,height=480,pixelformat='Y10 '
 
 # 6. Tuned exposure / blanking / gain defaults per sensor
 for sys_sd in /sys/class/video4linux/v4l-subdev*; do
@@ -100,10 +114,10 @@ for sys_sd in /sys/class/video4linux/v4l-subdev*; do
 done
 
 # 7. Stable device symlinks
-ln -sfn /dev/video0 /dev/video-front
-ln -sfn /dev/video4 /dev/video-rear
-ln -sfn /dev/video12 /dev/video-ir
+ln -sfn "$FRONT_DEV" /dev/video-front
+ln -sfn "$REAR_DEV" /dev/video-rear
+ln -sfn "$IR_DEV" /dev/video-ir
 
-echo "  [+] Front RGB ready: /dev/video-front -> /dev/video0  (2592x1944 SBGGR10P)"
-echo "  [+] Rear  RGB ready: /dev/video-rear  -> /dev/video4  (4224x3136 SGRBG10P)"
-echo "  [+] Front IR  ready: /dev/video-ir    -> /dev/video12 (640x480 Y10)"
+echo "  [+] Front RGB ready: /dev/video-front -> $FRONT_DEV  (2592x1944 SBGGR10P)"
+echo "  [+] Rear  RGB ready: /dev/video-rear  -> $REAR_DEV  (4224x3136 SGRBG10P)"
+echo "  [+] Front IR  ready: /dev/video-ir    -> $IR_DEV (640x480 Y10)"

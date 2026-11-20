@@ -28,8 +28,19 @@ modprobe ov7251
 echo "[4/4] Loading Qualcomm Spectra 380 CAMSS driver..."
 modprobe qcom_camss
 
+# Wait until the CAMSS media controller and VFE capture nodes are registered
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-    [ -e /dev/media0 ] && [ -e /dev/video12 ] && break
+    MEDIA_DEV=""
+    for m in /sys/bus/media/devices/media*; do
+        if [ -r "$m/model" ] && [ "$(cat "$m/model" 2>/dev/null || true)" = "Qualcomm Camera Subsystem" ]; then
+            MEDIA_DEV="/dev/$(basename "$m")"
+            break
+        fi
+    done
+    if [ -n "$MEDIA_DEV" ] && [ -e "$MEDIA_DEV" ]; then
+        IR_NODE="$(media-ctl -d "$MEDIA_DEV" -e msm_vfe3_video0 2>/dev/null || true)"
+        [ -n "$IR_NODE" ] && [ -e "$IR_NODE" ] && break
+    fi
     sleep 0.5
 done
 
