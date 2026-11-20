@@ -1,0 +1,226 @@
+From: robertijtsma <37256770+robertijtsma@users.noreply.github.com>
+Subject: [PATCH 3/4] media: qcom: camss: add privacy LEDs, pipeline rollback, and RDI format clamping
+
+Add three portable fixes for Qualcomm CAMSS:
+1. Optional DT GPIOs (privacy-led-front-gpios / privacy-led-rear-gpios)
+   refcounted per CSIPHY stream start/stop so camera privacy indicators
+   stay strictly synchronized with hardware streaming.
+2. Roll back already-started subdevices if a downstream s_stream(1) call
+   fails in video_start_streaming(), and stop subdevices in sink-to-source
+   order without aborting teardown on non-fatal warnings.
+3. Clamp non-line-based RDI video nodes to the active upstream subdev
+   format in __video_try_fmt(), allowing generic V4L2 clients (such as
+   OpenCV/Howdy on OV7251 Y10) to negotiate VIDIOC_S_FMT cleanly.
+
+Base: Linux v7.3
+
+Signed-off-by: robertijtsma <37256770+robertijtsma@users.noreply.github.com>
+---
+--- a/drivers/media/platform/qcom/camss/camss.h
++++ b/drivers/media/platform/qcom/camss/camss.h
+@@ -11,6 +11,8 @@
+ #define QC_MSM_CAMSS_H
+ 
+ #include <linux/device.h>
++#include <linux/gpio/consumer.h>
++#include <linux/mutex.h>
+ #include <linux/types.h>
+ #include <media/v4l2-async.h>
+ #include <media/v4l2-device.h>
+@@ -138,6 +140,11 @@
+ 	struct device_link *genpd_link;
+ 	struct icc_path *icc_path[ICC_SM8250_COUNT];
+ 	const struct camss_resources *res;
++	struct gpio_desc *privacy_led_front;
++	struct gpio_desc *privacy_led_rear;
++	struct mutex privacy_led_lock;
++	int front_led_refcnt;
++	int rear_led_refcnt;
+ };
+ 
+ struct camss_camera_interface {
+@@ -179,5 +186,6 @@
+ void camss_buf_done(struct camss *camss, int hw_id, int port_id);
+ void camss_reg_update(struct camss *camss, int hw_id,
+ 		      int port_id, bool is_clear);
++void camss_set_privacy_led(struct camss *camss, u8 csiphy_id, bool on);
+ 
+ #endif /* QC_MSM_CAMSS_H */
+--- a/drivers/media/platform/qcom/camss/camss.c
++++ b/drivers/media/platform/qcom/camss/camss.c
+@@ -5346,6 +5346,33 @@
+ 	dev_pm_domain_detach(camss->genpd, true);
+ }
+ 
++void camss_set_privacy_led(struct camss *camss, u8 csiphy_id, bool on)
++{
++	mutex_lock(&camss->privacy_led_lock);
++
++	if (csiphy_id == 0 || csiphy_id == 3) {
++		if (on)
++			camss->front_led_refcnt++;
++		else if (camss->front_led_refcnt > 0)
++			camss->front_led_refcnt--;
++
++		if (camss->privacy_led_front)
++			gpiod_set_value_cansleep(camss->privacy_led_front,
++						 camss->front_led_refcnt > 0 ? 1 : 0);
++	} else if (csiphy_id == 2) {
++		if (on)
++			camss->rear_led_refcnt++;
++		else if (camss->rear_led_refcnt > 0)
++			camss->rear_led_refcnt--;
++
++		if (camss->privacy_led_rear)
++			gpiod_set_value_cansleep(camss->privacy_led_rear,
++						 camss->rear_led_refcnt > 0 ? 1 : 0);
++	}
++
++	mutex_unlock(&camss->privacy_led_lock);
++}
++
+ /*
+  * camss_probe - Probe CAMSS platform device
+  * @pdev: Pointer to CAMSS platform device
+@@ -5367,6 +5394,23 @@
+ 	atomic_set(&camss->ref_count, 0);
+ 	camss->dev = dev;
+ 	platform_set_drvdata(pdev, camss);
++	mutex_init(&camss->privacy_led_lock);
++
++	camss->privacy_led_front =
++		devm_gpiod_get_optional(dev, "privacy-led-front", GPIOD_OUT_LOW);
++	if (IS_ERR(camss->privacy_led_front)) {
++		dev_warn(dev, "Failed to get front privacy LED GPIO: %ld\n",
++			 PTR_ERR(camss->privacy_led_front));
++		camss->privacy_led_front = NULL;
++	}
++
++	camss->privacy_led_rear =
++		devm_gpiod_get_optional(dev, "privacy-led-rear", GPIOD_OUT_LOW);
++	if (IS_ERR(camss->privacy_led_rear)) {
++		dev_warn(dev, "Failed to get rear privacy LED GPIO: %ld\n",
++			 PTR_ERR(camss->privacy_led_rear));
++		camss->privacy_led_rear = NULL;
++	}
+ 
+ 	camss->csiphy = devm_kcalloc(dev, camss->res->csiphy_num,
+ 				     sizeof(*camss->csiphy), GFP_KERNEL);
+--- a/drivers/media/platform/qcom/camss/camss-csiphy.c
++++ b/drivers/media/platform/qcom/camss/camss-csiphy.c
+@@ -324,10 +324,14 @@
+ 	struct csiphy_device *csiphy = v4l2_get_subdevdata(sd);
+ 	int ret = 0;
+ 
+-	if (enable)
++	if (enable) {
+ 		ret = csiphy_stream_on(csiphy);
+-	else
++		if (!ret)
++			camss_set_privacy_led(csiphy->camss, csiphy->id, true);
++	} else {
++		camss_set_privacy_led(csiphy->camss, csiphy->id, false);
+ 		csiphy_stream_off(csiphy);
++	}
+ 
+ 	return ret;
+ }
+--- a/drivers/media/platform/qcom/camss/camss-video.c
++++ b/drivers/media/platform/qcom/camss/camss-video.c
+@@ -256,7 +256,9 @@
+ 	struct media_entity *entity;
+ 	struct media_pad *pad;
+ 	struct v4l2_subdev *subdev;
+-	int ret;
++	struct v4l2_subdev *started[8];
++	int n_started = 0;
++	int i, ret;
+ 
+ 	ret = video_device_pipeline_alloc_start(vdev);
+ 	if (ret < 0) {
+@@ -283,11 +285,18 @@
+ 
+ 		ret = v4l2_subdev_call(subdev, video, s_stream, 1);
+ 		if (ret < 0 && ret != -ENOIOCTLCMD)
+-			goto error;
++			goto error_stop_subdevs;
++
++		if (n_started < ARRAY_SIZE(started))
++			started[n_started++] = subdev;
+ 	}
+ 
+ 	return 0;
+ 
++error_stop_subdevs:
++	for (i = 0; i < n_started; i++)
++		v4l2_subdev_call(started[i], video, s_stream, 0);
++
+ error:
+ 	video_device_pipeline_stop(vdev);
+ 
+@@ -303,11 +312,12 @@
+ 	struct video_device *vdev = &video->vdev;
+ 	struct media_entity *entity;
+ 	struct media_pad *pad;
+-	struct v4l2_subdev *subdev;
+-	int ret;
++	struct v4l2_subdev *subdevs[8];
++	int n_subdevs = 0;
++	int i, ret;
+ 
+ 	entity = &vdev->entity;
+-	while (1) {
++	while (n_subdevs < ARRAY_SIZE(subdevs)) {
+ 		pad = &entity->pads[0];
+ 		if (!(pad->flags & MEDIA_PAD_FL_SINK))
+ 			break;
+@@ -317,14 +327,21 @@
+ 			break;
+ 
+ 		entity = pad->entity;
+-		subdev = media_entity_to_v4l2_subdev(entity);
+-
+-		ret = v4l2_subdev_call(subdev, video, s_stream, 0);
++		subdevs[n_subdevs++] = media_entity_to_v4l2_subdev(entity);
++	}
+ 
+-		if (ret) {
+-			dev_err(video->camss->dev, "Video pipeline stop failed: %d\n", ret);
+-			return;
+-		}
++	/*
++	 * Stop subdevices in sink-to-source order (VFE -> CSID -> CSIPHY -> sensor)
++	 * so VFE latches WM_CFG = 0 and REG_UPDATE_CMD on the next EOF/SOF while
++	 * upstream subdevices are still active, and always continue shutting down
++	 * remaining subdevices even if one returns a non-fatal error.
++	 */
++	for (i = 0; i < n_subdevs; i++) {
++		ret = v4l2_subdev_call(subdevs[i], video, s_stream, 0);
++		if (ret && ret != -ENOIOCTLCMD)
++			dev_warn(video->camss->dev,
++				 "Video pipeline stop subdev %s warning: %d\n",
++				 subdevs[i]->name, ret);
+ 	}
+ 
+ 	video_device_pipeline_stop(vdev);
+@@ -466,6 +483,7 @@
+ 	struct v4l2_pix_format_mplane *pix_mp;
+ 	const struct camss_format_info *fi;
+ 	struct v4l2_plane_pix_format *p;
++	struct v4l2_format sd_fmt = { 0 };
+ 	u32 bytesperline[3] = { 0 };
+ 	u32 sizeimage[3] = { 0 };
+ 	u32 width, height;
+@@ -474,6 +492,12 @@
+ 
+ 	pix_mp = &f->fmt.pix_mp;
+ 
++	if (!video->line_based && video_get_subdev_format(video, &sd_fmt) == 0) {
++		pix_mp->pixelformat = sd_fmt.fmt.pix_mp.pixelformat;
++		pix_mp->width = sd_fmt.fmt.pix_mp.width;
++		pix_mp->height = sd_fmt.fmt.pix_mp.height;
++	}
++
+ 	if (video->line_based)
+ 		for (i = 0; i < pix_mp->num_planes && i < 3; i++) {
+ 			p = &pix_mp->plane_fmt[i];

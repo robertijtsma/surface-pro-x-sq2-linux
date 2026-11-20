@@ -1,0 +1,438 @@
+--- a/sc8180x-surface-pro-x-audio-base.dts
++++ b/sc8180x-surface-pro-x-sq2-cameras.dts
+@@ -526,6 +526,7 @@
+ 
+ 	interconnect-camnoc-virt {
+ 		compatible = "qcom,sc8180x-camnoc-virt";
++		phandle = <0xc1>;
+ 		#interconnect-cells = <0x02>;
+ 		qcom,bcm-voters = <0x21>;
+ 	};
+@@ -537,6 +538,24 @@
+ 		phandle = <0x06>;
+ 	};
+ 
++	regulator-cam-dummy {
++		compatible = "regulator-fixed";
++		regulator-name = "cam-dummy";
++		regulator-min-microvolt = <0x1b7740>;
++		regulator-max-microvolt = <0x1b7740>;
++		regulator-always-on;
++		phandle = <0xc2>;
++	};
++
++	opp-table-csiphy {
++		compatible = "operating-points-v2";
++		phandle = <0xe3>;
++
++		opp-400000000 {
++			opp-hz = <0x00 0x17d78400>;
++		};
++	};
++
+ 	interconnect-qup-virt {
+ 		compatible = "qcom,sc8180x-qup-virt";
+ 		#interconnect-cells = <0x02>;
+@@ -2130,6 +2149,30 @@
+ 			gpio-reserved-ranges = <0x00 0x04 0x2f 0x04>;
+ 			phandle = <0x33>;
+ 
++			cci0-default-state {
++				pins = "gpio17", "gpio18", "gpio19", "gpio20";
++				function = "cci_i2c";
++				drive-strength = <0x02>;
++				bias-pull-up;
++				phandle = <0xe0>;
++			};
++
++			cci1-default-state {
++				pins = "gpio31", "gpio32", "gpio33", "gpio34";
++				function = "cci_i2c";
++				drive-strength = <0x02>;
++				bias-pull-up;
++				phandle = <0xe1>;
++			};
++
++			cam-mclk-default-state {
++				pins = "gpio13", "gpio15", "gpio16";
++				function = "cam_mclk";
++				drive-strength = <0x02>;
++				bias-disable;
++				phandle = <0xe2>;
++			};
++
+ 			wcd-intr-default-state {
+ 				pins = "gpio123";
+ 				function = "gpio";
+@@ -2722,6 +2765,7 @@
+ 
+ 		clock-controller@ad00000 {
+ 			compatible = "qcom,sc8180x-camcc";
++			phandle = <0xc0>;
+ 			reg = <0x00 0xad00000 0x00 0x20000>;
+ 			clocks = <0x2d 0xf2 0x2b 0x00 0x2c>;
+ 			power-domains = <0x22 0x06>;
+@@ -2731,6 +2775,363 @@
+ 			#power-domain-cells = <0x01>;
+ 		};
+ 
++		cci@ac4a000 {
++			compatible = "qcom,sc8180x-cci", "qcom,sm8250-cci";
++			#address-cells = <0x01>;
++			#size-cells = <0x00>;
++			reg = <0x00 0xac4a000 0x00 0x1000>;
++			interrupts = <0x00 0x1cc 0x01>;
++			power-domains = <0xc0 0x07>;
++			clocks = <0xc0 0x05 0xc0 0x7d 0xc0 0x11 0xc0 0x08 0xc0 0x09 0xc0 0x0a 0xc0 0x0b>;
++			clock-names = "camnoc_axi", "slow_ahb_src", "cpas_ahb", "cci0", "cci0_src", "cci1", "cci1_src";
++			assigned-clocks = <0xc0 0x09 0xc0 0x0b>;
++			assigned-clock-rates = <0x23c3460 0x23c3460>;
++			pinctrl-names = "default";
++			pinctrl-0 = <0xe0 0xe2>;
++			status = "okay";
++			phandle = <0xda>;
++
++			i2c-bus@0 {
++				reg = <0x00>;
++				clock-frequency = <0x61a80>;
++				#address-cells = <0x01>;
++				#size-cells = <0x00>;
++
++				camera@10 {
++					compatible = "ovti,ov13858";
++					reg = <0x10>;
++					clocks = <0xc0 0x63>;
++					clock-names = "xvclk";
++					reset-gpios = <0x33 0x16 0x00>;
++					orientation = <0x01>;
++					rotation = <0x00>;
++					status = "okay";
++
++					port {
++
++						endpoint {
++							remote-endpoint = <0xcf>;
++							data-lanes = <0x01 0x02 0x03 0x04>;
++							link-frequencies = <0x00 0x202fbf00>;
++							phandle = <0xcc>;
++						};
++					};
++				};
++
++				camera@60 {
++					compatible = "ovti,ov7251";
++					reg = <0x60>;
++					clocks = <0xc0 0x69>;
++					clock-names = "xclk";
++					clock-frequency = <0x124f800>;
++					vdddo-supply = <0xc2>;
++					vdda-supply = <0xc2>;
++					vddd-supply = <0xc2>;
++					enable-gpios = <0x33 0x17 0x00>;
++					orientation = <0x00>;
++					rotation = <0x00>;
++					status = "okay";
++
++					port {
++
++						endpoint {
++							remote-endpoint = <0xd1>;
++							data-lanes = <0x01>;
++							link-frequencies = <0x00 0xe4e1c00>;
++							phandle = <0xd0>;
++						};
++					};
++				};
++			};
++
++			i2c-bus@1 {
++				reg = <0x01>;
++				clock-frequency = <0x61a80>;
++				#address-cells = <0x01>;
++				#size-cells = <0x00>;
++
++				camera@36 {
++					compatible = "ovti,ov5693";
++					reg = <0x36>;
++					clocks = <0xc0 0x67>;
++					clock-names = "xvclk";
++					avdd-supply = <0xc2>;
++					dovdd-supply = <0xc2>;
++					dvdd-supply = <0xc2>;
++					reset-gpios = <0x33 0x0c 0x01>;
++					orientation = <0x00>;
++					rotation = <0xb4>;
++					status = "okay";
++
++					port {
++
++						endpoint {
++							remote-endpoint = <0xcb>;
++							data-lanes = <0x01 0x02>;
++							clock-noncontinuous;
++							link-frequencies = <0x00 0x18fc7c00>;
++							phandle = <0xce>;
++						};
++					};
++				};
++			};
++		};
++
++		cci@ac4b000 {
++			compatible = "qcom,sc8180x-cci", "qcom,sm8250-cci";
++			#address-cells = <0x01>;
++			#size-cells = <0x00>;
++			reg = <0x00 0xac4b000 0x00 0x1000>;
++			interrupts = <0x00 0x28a 0x01>;
++			power-domains = <0xc0 0x07>;
++			clocks = <0xc0 0x05 0xc0 0x7d 0xc0 0x11 0xc0 0x0c 0xc0 0x0d 0xc0 0x0e 0xc0 0x0f>;
++			clock-names = "camnoc_axi", "slow_ahb_src", "cpas_ahb", "cci0", "cci0_src", "cci1", "cci1_src";
++			assigned-clocks = <0xc0 0x0d 0xc0 0x0f>;
++			assigned-clock-rates = <0x23c3460 0x23c3460>;
++			pinctrl-names = "default";
++			pinctrl-0 = <0xe1>;
++			status = "disabled";
++			phandle = <0xe4>;
++
++			i2c-bus@0 {
++				reg = <0x00>;
++				clock-frequency = <0x61a80>;
++				#address-cells = <0x01>;
++				#size-cells = <0x00>;
++			};
++
++			i2c-bus@1 {
++				reg = <0x01>;
++				clock-frequency = <0x61a80>;
++				#address-cells = <0x01>;
++				#size-cells = <0x00>;
++			};
++		};
++
++		isp@acaf000 {
++			compatible = "qcom,sc8180x-camss", "qcom,sm8150-camss";
++			status = "okay";
++			phys = <0xdc 0xdd 0xde 0xdf>;
++			reg = <0x00 0xacaf000 0x00 0x4000 0x00 0xacb3000 0x00 0x1000 0x00 0xacb6000 0x00 0x4000 0x00 0xacba000 0x00 0x1000 0x00 0xacc4000 0x00 0x4000 0x00 0xacc8000 0x00 0x1000 0x00 0xaccb000 0x00 0x4000 0x00 0xaccf000 0x00 0x1000>;
++			reg-names = "vfe0", "csid0", "vfe1", "csid1", "vfe_lite0", "csid_lite0", "vfe_lite1", "csid_lite1";
++			interrupts = <0x00 0x1d1 0x01 0x00 0x1d0 0x01 0x00 0x1d3 0x01 0x00 0x1d2 0x01 0x00 0x1d5 0x01 0x00 0x1d4 0x01 0x00 0x168 0x01 0x00 0x167 0x01>;
++			interrupt-names = "vfe0", "csid0", "vfe1", "csid1", "vfe_lite0", "csid_lite0", "vfe_lite1", "csid_lite1";
++			power-domains = <0xc0 0x01 0xc0 0x02 0xc0 0x07>;
++			power-domain-names = "ife0", "ife1", "top";
++			clocks = <0xc0 0x05 0xc0 0x11 0xc0 0x26 0xc0 0x27 0xc0 0x29 0xc0 0x2a 0xc0 0x2d 0xc0 0x2e 0xc0 0x30 0xc0 0x31 0xc0 0x42 0xc0 0x44 0xc0 0x45 0xc0 0x47 0xc0 0x49 0xc0 0x4a 0x2d 0x09 0x2d 0x0a 0x2d 0xf2 0x2d 0xf3 0xc0 0x07 0xc0 0x2c 0xc0 0x33>;
++			clock-names = "camnoc_axi", "cpas_ahb", "vfe0_axi", "vfe0", "vfe0_cphy_rx", "vfe0_csid", "vfe1_axi", "vfe1", "vfe1_cphy_rx", "vfe1_csid", "vfe_lite0", "vfe_lite0_cphy_rx", "vfe_lite0_csid", "vfe_lite1", "vfe_lite1_cphy_rx", "vfe_lite1_csid", "gcc_axi_hf", "gcc_axi_sf", "gcc_ahb", "gcc_xo", "camnoc_dcd_xo", "vfe0_dsp", "vfe1_dsp";
++			iommus = <0x2e 0xa00 0x00 0x2e 0xa20 0x00 0x2e 0xa40 0x00 0x2e 0xa60 0x00 0x2e 0xa80 0x00 0x2e 0xaa0 0x00 0x2e 0xac0 0x00 0x2e 0xae0 0x00 0x2e 0xe00 0x00 0x2e 0xe20 0x00 0x2e 0xe40 0x00 0x2e 0xe60 0x00 0x2e 0xe80 0x00 0x2e 0xea0 0x00 0x2e 0xec0 0x00 0x2e 0xee0 0x00>;
++			interconnects = <0x05 0x00 0x07 0x30 0x09 0x07 0x6c 0x01 0x07 0x06 0x01 0x07 0x6c 0x03 0x07 0x06 0x01 0x07 0x6c 0x02 0x07 0x06 0x01 0x07>;
++			interconnect-names = "cam_ahb", "cam_hf_0_mnoc", "cam_sf_0_mnoc", "cam_hf_1_mnoc";
++			privacy-led-front-gpios = <0x33 0x19 0x00>;
++			privacy-led-rear-gpios = <0x33 0x0b 0x00>;
++			phandle = <0xdb>;
++
++			ports {
++				#address-cells = <0x01>;
++				#size-cells = <0x00>;
++
++				port@0 {
++					reg = <0x00>;
++
++					endpoint {
++						remote-endpoint = <0xc4>;
++						data-lanes = <0x01 0x02>;
++						phandle = <0xc3>;
++					};
++				};
++
++				port@1 {
++					reg = <0x01>;
++
++					endpoint {
++						remote-endpoint = <0xc6>;
++						data-lanes = <0x01>;
++						phandle = <0xc5>;
++					};
++				};
++
++				port@2 {
++					reg = <0x02>;
++
++					endpoint {
++						remote-endpoint = <0xc8>;
++						data-lanes = <0x01 0x02 0x03 0x04>;
++						phandle = <0xc7>;
++					};
++				};
++
++				port@3 {
++					reg = <0x03>;
++
++					endpoint {
++						remote-endpoint = <0xca>;
++						data-lanes = <0x01>;
++						phandle = <0xc9>;
++					};
++				};
++			};
++		};
++
++		phy@ac65000 {
++			compatible = "qcom,sc8180x-csi2-phy", "qcom,sm8150-csi2-phy";
++			reg = <0x00 0xac65000 0x00 0x1000>;
++			#phy-cells = <0x00>;
++			operating-points-v2 = <0xe3>;
++			status = "okay";
++			clocks = <0xc0 0x1b 0xc0 0x13>;
++			clock-names = "core", "timer";
++			interrupts = <0x00 0x1dd 0x01>;
++			power-domains = <0xc0 0x07>;
++			power-domain-names = "top";
++			vdda-phy-supply = <0xc2>;
++			vdda-pll-supply = <0xc2>;
++			phandle = <0xdc>;
++
++			ports {
++				#address-cells = <0x01>;
++				#size-cells = <0x00>;
++
++				port@0 {
++					reg = <0x00>;
++
++					endpoint {
++						remote-endpoint = <0xce>;
++						data-lanes = <0x01 0x02>;
++						phandle = <0xcb>;
++					};
++				};
++
++				port@1 {
++					reg = <0x01>;
++
++					endpoint {
++						remote-endpoint = <0xc3>;
++						phandle = <0xc4>;
++					};
++				};
++			};
++		};
++
++		phy@ac66000 {
++			compatible = "qcom,sc8180x-csi2-phy", "qcom,sm8150-csi2-phy";
++			reg = <0x00 0xac66000 0x00 0x1000>;
++			#phy-cells = <0x00>;
++			operating-points-v2 = <0xe3>;
++			status = "disabled";
++			clocks = <0xc0 0x1c 0xc0 0x15>;
++			clock-names = "core", "timer";
++			interrupts = <0x00 0x1de 0x01>;
++			power-domains = <0xc0 0x07>;
++			power-domain-names = "top";
++			vdda-phy-supply = <0xc2>;
++			vdda-pll-supply = <0xc2>;
++			phandle = <0xdd>;
++
++			ports {
++				#address-cells = <0x01>;
++				#size-cells = <0x00>;
++
++				port@0 {
++					reg = <0x00>;
++
++					endpoint {
++						data-lanes = <0x01>;
++						phandle = <0xcd>;
++					};
++				};
++
++				port@1 {
++					reg = <0x01>;
++
++					endpoint {
++						remote-endpoint = <0xc5>;
++						phandle = <0xc6>;
++					};
++				};
++			};
++		};
++
++		phy@ac67000 {
++			compatible = "qcom,sc8180x-csi2-phy", "qcom,sm8150-csi2-phy";
++			reg = <0x00 0xac67000 0x00 0x1000>;
++			#phy-cells = <0x00>;
++			operating-points-v2 = <0xe3>;
++			status = "okay";
++			clocks = <0xc0 0x1d 0xc0 0x17>;
++			clock-names = "core", "timer";
++			interrupts = <0x00 0x1df 0x01>;
++			power-domains = <0xc0 0x07>;
++			power-domain-names = "top";
++			vdda-phy-supply = <0xc2>;
++			vdda-pll-supply = <0xc2>;
++			phandle = <0xde>;
++
++			ports {
++				#address-cells = <0x01>;
++				#size-cells = <0x00>;
++
++				port@0 {
++					reg = <0x00>;
++
++					endpoint {
++						remote-endpoint = <0xcc>;
++						data-lanes = <0x01 0x02 0x03 0x04>;
++						phandle = <0xcf>;
++					};
++				};
++
++				port@1 {
++					reg = <0x01>;
++
++					endpoint {
++						remote-endpoint = <0xc7>;
++						phandle = <0xc8>;
++					};
++				};
++			};
++		};
++
++		phy@ac68000 {
++			compatible = "qcom,sc8180x-csi2-phy", "qcom,sm8150-csi2-phy";
++			reg = <0x00 0xac68000 0x00 0x1000>;
++			#phy-cells = <0x00>;
++			operating-points-v2 = <0xe3>;
++			status = "okay";
++			clocks = <0xc0 0x1e 0xc0 0x19>;
++			clock-names = "core", "timer";
++			interrupts = <0x00 0x1c0 0x01>;
++			power-domains = <0xc0 0x07>;
++			power-domain-names = "top";
++			vdda-phy-supply = <0xc2>;
++			vdda-pll-supply = <0xc2>;
++			phandle = <0xdf>;
++
++			ports {
++				#address-cells = <0x01>;
++				#size-cells = <0x00>;
++
++				port@0 {
++					reg = <0x00>;
++
++					endpoint {
++						remote-endpoint = <0xd0>;
++						data-lanes = <0x01>;
++						phandle = <0xd1>;
++					};
++				};
++
++				port@1 {
++					reg = <0x01>;
++
++					endpoint {
++						remote-endpoint = <0xc9>;
++						phandle = <0xca>;
++					};
++				};
++			};
++		};
++
+ 		display-subsystem@ae00000 {
+ 			compatible = "qcom,sc8180x-mdss";
+ 			reg = <0x00 0xae00000 0x00 0x1000>;

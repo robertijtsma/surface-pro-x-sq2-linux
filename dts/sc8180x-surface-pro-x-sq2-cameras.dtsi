@@ -1,0 +1,459 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
+/*
+ * Microsoft Surface Pro X SQ2 (Qualcomm SC8180X) camera subsystem DTSI.
+ *
+ * Proven hardware topology on live SQ2 hardware:
+ *   - Front RGB 5 MP  (OV5693, CCI0 bus 1 @ 0x36, MCLK2, reset GPIO 12 active-low,
+ *                      rotation 180 deg) -> CSIPHY0 (2 lanes) -> CSID0 -> VFE0 RDI0
+ *   - Rear  RGB 13 MP (OV13858, CCI0 bus 0 @ 0x10, MCLK0, reset GPIO 22 active-high,
+ *                      rotation 0 deg)   -> CSIPHY2 (4 lanes) -> CSID1 -> VFE1 RDI0
+ *   - Front IR  VGA   (OV7251, CCI0 bus 0 @ 0x60, MCLK3, enable GPIO 23 active-high,
+ *                      90 deg portrait mount) -> CSIPHY3 (1 lane) -> CSID_LITE1 -> VFE_LITE1 RDI0
+ *
+ * Privacy LEDs (refcounted via qcom-camss csiphy_set_stream):
+ *   - Front white privacy LED: TLMM GPIO 25 (shared by OV5693 + OV7251)
+ *   - Rear  white privacy LED: TLMM GPIO 11 (OV13858)
+ *
+ * Note: Sensor power rails (PMC8180-A LDO14_A 1.8V, LDO17_A 2.856V, LDO1_A 1.2V)
+ * are brought up via drivers/surface_cam_spmi until modeled in PMC8180 SPMI DT.
+ */
+
+#include <dt-bindings/clock/qcom,gcc-sc8180x.h>
+#include <dt-bindings/clock/qcom,sc8180x-camcc.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interconnect/qcom,icc.h>
+#include <dt-bindings/interconnect/qcom,sc8180x.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+
+/ {
+	vreg_cam_dummy: regulator-cam-dummy {
+		compatible = "regulator-fixed";
+		regulator-name = "cam-dummy";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+	};
+
+	csiphy_opp_table: opp-table-csiphy {
+		compatible = "operating-points-v2";
+
+		opp-400000000 {
+			opp-hz = /bits/ 64 <400000000>;
+		};
+	};
+};
+
+&tlmm {
+	cci0_default: cci0-default-state {
+		pins = "gpio17", "gpio18", "gpio19", "gpio20";
+		function = "cci_i2c";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	cci1_default: cci1-default-state {
+		pins = "gpio31", "gpio32", "gpio33", "gpio34";
+		function = "cci_i2c";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	cam_mclk_default: cam-mclk-default-state {
+		pins = "gpio13", "gpio15", "gpio16";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+};
+
+&soc {
+	cci0: cci@ac4a000 {
+		compatible = "qcom,sc8180x-cci", "qcom,sm8250-cci";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		reg = <0 0x0ac4a000 0 0x1000>;
+		interrupts = <GIC_SPI 460 IRQ_TYPE_EDGE_RISING>;
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+		clocks = <&camcc CAM_CC_CAMNOC_AXI_CLK>,
+			 <&camcc CAM_CC_SLOW_AHB_CLK_SRC>,
+			 <&camcc CAM_CC_CPAS_AHB_CLK>,
+			 <&camcc CAM_CC_CCI_0_CLK>,
+			 <&camcc CAM_CC_CCI_0_CLK_SRC>,
+			 <&camcc CAM_CC_CCI_1_CLK>,
+			 <&camcc CAM_CC_CCI_1_CLK_SRC>;
+		clock-names = "camnoc_axi", "slow_ahb_src", "cpas_ahb",
+			      "cci0", "cci0_src", "cci1", "cci1_src";
+		assigned-clocks = <&camcc CAM_CC_CCI_0_CLK_SRC>,
+				  <&camcc CAM_CC_CCI_1_CLK_SRC>;
+		assigned-clock-rates = <37500000>, <37500000>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cci0_default>, <&cam_mclk_default>;
+		status = "okay";
+
+		i2c-bus@0 {
+			reg = <0>;
+			clock-frequency = <400000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/* Rear 13 MP RGB camera */
+			rear_camera: camera@10 {
+				compatible = "ovti,ov13858";
+				reg = <0x10>;
+				clocks = <&camcc CAM_CC_MCLK0_CLK>;
+				clock-names = "xvclk";
+				reset-gpios = <&tlmm 22 GPIO_ACTIVE_HIGH>;
+				orientation = <1>; /* back */
+				rotation = <0>;
+				status = "okay";
+
+				port {
+					ov13858_ep: endpoint {
+						remote-endpoint = <&csiphy2_in>;
+						data-lanes = <1 2 3 4>;
+						link-frequencies = /bits/ 64 <540000000>;
+					};
+				};
+			};
+
+			/* Front VGA IR camera (Windows Hello / Howdy) */
+			ir_camera: camera@60 {
+				compatible = "ovti,ov7251";
+				reg = <0x60>;
+				clocks = <&camcc CAM_CC_MCLK3_CLK>;
+				clock-names = "xclk";
+				clock-frequency = <19200000>;
+				vdddo-supply = <&vreg_cam_dummy>;
+				vdda-supply = <&vreg_cam_dummy>;
+				vddd-supply = <&vreg_cam_dummy>;
+				enable-gpios = <&tlmm 23 GPIO_ACTIVE_HIGH>;
+				orientation = <0>; /* front */
+				rotation = <0>;    /* physically mounted 90 deg CCW portrait */
+				status = "okay";
+
+				port {
+					ov7251_ep: endpoint {
+						remote-endpoint = <&csiphy3_in>;
+						data-lanes = <1>;
+						link-frequencies = /bits/ 64 <240000000>;
+					};
+				};
+			};
+		};
+
+		i2c-bus@1 {
+			reg = <1>;
+			clock-frequency = <400000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/* Front 5 MP RGB camera */
+			front_camera: camera@36 {
+				compatible = "ovti,ov5693";
+				reg = <0x36>;
+				clocks = <&camcc CAM_CC_MCLK2_CLK>;
+				clock-names = "xvclk";
+				avdd-supply = <&vreg_cam_dummy>;
+				dovdd-supply = <&vreg_cam_dummy>;
+				dvdd-supply = <&vreg_cam_dummy>;
+				reset-gpios = <&tlmm 12 GPIO_ACTIVE_LOW>;
+				orientation = <0>; /* front */
+				rotation = <180>;
+				status = "okay";
+
+				port {
+					ov5693_ep: endpoint {
+						remote-endpoint = <&csiphy0_in>;
+						data-lanes = <1 2>;
+						clock-noncontinuous;
+						link-frequencies = /bits/ 64 <419200000>;
+					};
+				};
+			};
+		};
+	};
+
+	camss: isp@acaf000 {
+		compatible = "qcom,sc8180x-camss", "qcom,sm8150-camss";
+		status = "okay";
+		phys = <&csiphy0>, <&csiphy1>, <&csiphy2>, <&csiphy3>;
+
+		reg = <0 0x0acaf000 0 0x4000>,
+		      <0 0x0acb3000 0 0x1000>,
+		      <0 0x0acb6000 0 0x4000>,
+		      <0 0x0acba000 0 0x1000>,
+		      <0 0x0acc4000 0 0x4000>,
+		      <0 0x0acc8000 0 0x1000>,
+		      <0 0x0accb000 0 0x4000>,
+		      <0 0x0accf000 0 0x1000>;
+		reg-names = "vfe0", "csid0",
+			    "vfe1", "csid1",
+			    "vfe_lite0", "csid_lite0",
+			    "vfe_lite1", "csid_lite1";
+
+		interrupts = <GIC_SPI 465 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 464 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 467 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 466 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 469 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 468 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 360 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 359 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "vfe0", "csid0",
+				  "vfe1", "csid1",
+				  "vfe_lite0", "csid_lite0",
+				  "vfe_lite1", "csid_lite1";
+
+		power-domains = <&camcc IFE_0_GDSC>,
+				<&camcc IFE_1_GDSC>,
+				<&camcc TITAN_TOP_GDSC>;
+		power-domain-names = "ife0", "ife1", "top";
+
+		clocks = <&camcc CAM_CC_CAMNOC_AXI_CLK>,
+			 <&camcc CAM_CC_CPAS_AHB_CLK>,
+			 <&camcc CAM_CC_IFE_0_AXI_CLK>,
+			 <&camcc CAM_CC_IFE_0_CLK>,
+			 <&camcc CAM_CC_IFE_0_CPHY_RX_CLK>,
+			 <&camcc CAM_CC_IFE_0_CSID_CLK>,
+			 <&camcc CAM_CC_IFE_1_AXI_CLK>,
+			 <&camcc CAM_CC_IFE_1_CLK>,
+			 <&camcc CAM_CC_IFE_1_CPHY_RX_CLK>,
+			 <&camcc CAM_CC_IFE_1_CSID_CLK>,
+			 <&camcc CAM_CC_IFE_LITE_0_CLK>,
+			 <&camcc CAM_CC_IFE_LITE_0_CPHY_RX_CLK>,
+			 <&camcc CAM_CC_IFE_LITE_0_CSID_CLK>,
+			 <&camcc CAM_CC_IFE_LITE_1_CLK>,
+			 <&camcc CAM_CC_IFE_LITE_1_CPHY_RX_CLK>,
+			 <&camcc CAM_CC_IFE_LITE_1_CSID_CLK>,
+			 <&gcc GCC_CAMERA_HF_AXI_CLK>,
+			 <&gcc GCC_CAMERA_SF_AXI_CLK>,
+			 <&gcc GCC_CAMERA_AHB_CLK>,
+			 <&gcc GCC_CAMERA_XO_CLK>,
+			 <&camcc CAM_CC_CAMNOC_DCD_XO_CLK>,
+			 <&camcc CAM_CC_IFE_0_DSP_CLK>,
+			 <&camcc CAM_CC_IFE_1_DSP_CLK>;
+		clock-names = "camnoc_axi", "cpas_ahb",
+			      "vfe0_axi", "vfe0", "vfe0_cphy_rx", "vfe0_csid",
+			      "vfe1_axi", "vfe1", "vfe1_cphy_rx", "vfe1_csid",
+			      "vfe_lite0", "vfe_lite0_cphy_rx", "vfe_lite0_csid",
+			      "vfe_lite1", "vfe_lite1_cphy_rx", "vfe_lite1_csid",
+			      "gcc_axi_hf", "gcc_axi_sf", "gcc_ahb", "gcc_xo",
+			      "camnoc_dcd_xo", "vfe0_dsp", "vfe1_dsp";
+
+		/* Verified SC8180X CAMSS SMMU Stream IDs (mask 0x0) */
+		iommus = <&apps_smmu 0xa00 0x0>, <&apps_smmu 0xa20 0x0>,
+			 <&apps_smmu 0xa40 0x0>, <&apps_smmu 0xa60 0x0>,
+			 <&apps_smmu 0xa80 0x0>, <&apps_smmu 0xaa0 0x0>,
+			 <&apps_smmu 0xac0 0x0>, <&apps_smmu 0xae0 0x0>,
+			 <&apps_smmu 0xe00 0x0>, <&apps_smmu 0xe20 0x0>,
+			 <&apps_smmu 0xe40 0x0>, <&apps_smmu 0xe60 0x0>,
+			 <&apps_smmu 0xe80 0x0>, <&apps_smmu 0xea0 0x0>,
+			 <&apps_smmu 0xec0 0x0>, <&apps_smmu 0xee0 0x0>;
+
+		interconnects = <&gem_noc MASTER_AMPSS_M0 QCOM_ICC_TAG_ALWAYS
+				 &config_noc SLAVE_CAMERA_CFG QCOM_ICC_TAG_ALWAYS>,
+				<&mmss_noc MASTER_CAMNOC_HF0 QCOM_ICC_TAG_ALWAYS
+				 &mc_virt SLAVE_EBI_CH0 QCOM_ICC_TAG_ALWAYS>,
+				<&mmss_noc MASTER_CAMNOC_SF QCOM_ICC_TAG_ALWAYS
+				 &mc_virt SLAVE_EBI_CH0 QCOM_ICC_TAG_ALWAYS>,
+				<&mmss_noc MASTER_CAMNOC_HF1 QCOM_ICC_TAG_ALWAYS
+				 &mc_virt SLAVE_EBI_CH0 QCOM_ICC_TAG_ALWAYS>;
+		interconnect-names = "cam_ahb", "cam_hf_0_mnoc",
+				     "cam_sf_0_mnoc", "cam_hf_1_mnoc";
+
+		privacy-led-front-gpios = <&tlmm 25 GPIO_ACTIVE_HIGH>;
+		privacy-led-rear-gpios = <&tlmm 11 GPIO_ACTIVE_HIGH>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				camss_csiphy0_in: endpoint {
+					remote-endpoint = <&csiphy0_out>;
+					data-lanes = <1 2>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+
+				camss_csiphy1_in: endpoint {
+					remote-endpoint = <&csiphy1_out>;
+					data-lanes = <1>;
+				};
+			};
+
+			port@2 {
+				reg = <2>;
+
+				camss_csiphy2_in: endpoint {
+					remote-endpoint = <&csiphy2_out>;
+					data-lanes = <1 2 3 4>;
+				};
+			};
+
+			port@3 {
+				reg = <3>;
+
+				camss_csiphy3_in: endpoint {
+					remote-endpoint = <&csiphy3_out>;
+					data-lanes = <1>;
+				};
+			};
+		};
+	};
+
+	csiphy0: phy@ac65000 {
+		compatible = "qcom,sc8180x-csi2-phy", "qcom,sm8150-csi2-phy";
+		reg = <0 0x0ac65000 0 0x1000>;
+		#phy-cells = <0>;
+		operating-points-v2 = <&csiphy_opp_table>;
+		clocks = <&camcc CAM_CC_CSIPHY0_CLK>,
+			 <&camcc CAM_CC_CSI0PHYTIMER_CLK>;
+		clock-names = "core", "timer";
+		interrupts = <GIC_SPI 477 IRQ_TYPE_EDGE_RISING>;
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+		power-domain-names = "top";
+		vdda-phy-supply = <&vreg_cam_dummy>;
+		vdda-pll-supply = <&vreg_cam_dummy>;
+		status = "okay";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				csiphy0_in: endpoint {
+					remote-endpoint = <&ov5693_ep>;
+					data-lanes = <1 2>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+
+				csiphy0_out: endpoint {
+					remote-endpoint = <&camss_csiphy0_in>;
+				};
+			};
+		};
+	};
+
+	csiphy1: phy@ac66000 {
+		compatible = "qcom,sc8180x-csi2-phy", "qcom,sm8150-csi2-phy";
+		reg = <0 0x0ac66000 0 0x1000>;
+		#phy-cells = <0>;
+		operating-points-v2 = <&csiphy_opp_table>;
+		clocks = <&camcc CAM_CC_CSIPHY1_CLK>,
+			 <&camcc CAM_CC_CSI1PHYTIMER_CLK>;
+		clock-names = "core", "timer";
+		interrupts = <GIC_SPI 478 IRQ_TYPE_EDGE_RISING>;
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+		power-domain-names = "top";
+		vdda-phy-supply = <&vreg_cam_dummy>;
+		vdda-pll-supply = <&vreg_cam_dummy>;
+		status = "disabled";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				endpoint {
+					data-lanes = <1>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+
+				csiphy1_out: endpoint {
+					remote-endpoint = <&camss_csiphy1_in>;
+				};
+			};
+		};
+	};
+
+	csiphy2: phy@ac67000 {
+		compatible = "qcom,sc8180x-csi2-phy", "qcom,sm8150-csi2-phy";
+		reg = <0 0x0ac67000 0 0x1000>;
+		#phy-cells = <0>;
+		operating-points-v2 = <&csiphy_opp_table>;
+		clocks = <&camcc CAM_CC_CSIPHY2_CLK>,
+			 <&camcc CAM_CC_CSI2PHYTIMER_CLK>;
+		clock-names = "core", "timer";
+		interrupts = <GIC_SPI 479 IRQ_TYPE_EDGE_RISING>;
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+		power-domain-names = "top";
+		vdda-phy-supply = <&vreg_cam_dummy>;
+		vdda-pll-supply = <&vreg_cam_dummy>;
+		status = "okay";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				csiphy2_in: endpoint {
+					remote-endpoint = <&ov13858_ep>;
+					data-lanes = <1 2 3 4>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+
+				csiphy2_out: endpoint {
+					remote-endpoint = <&camss_csiphy2_in>;
+				};
+			};
+		};
+	};
+
+	csiphy3: phy@ac68000 {
+		compatible = "qcom,sc8180x-csi2-phy", "qcom,sm8150-csi2-phy";
+		reg = <0 0x0ac68000 0 0x1000>;
+		#phy-cells = <0>;
+		operating-points-v2 = <&csiphy_opp_table>;
+		clocks = <&camcc CAM_CC_CSIPHY3_CLK>,
+			 <&camcc CAM_CC_CSI3PHYTIMER_CLK>;
+		clock-names = "core", "timer";
+		interrupts = <GIC_SPI 448 IRQ_TYPE_EDGE_RISING>;
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+		power-domain-names = "top";
+		vdda-phy-supply = <&vreg_cam_dummy>;
+		vdda-pll-supply = <&vreg_cam_dummy>;
+		status = "okay";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				csiphy3_in: endpoint {
+					remote-endpoint = <&ov7251_ep>;
+					data-lanes = <1>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+
+				csiphy3_out: endpoint {
+					remote-endpoint = <&camss_csiphy3_in>;
+				};
+			};
+		};
+	};
+};

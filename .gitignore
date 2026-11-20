@@ -1,0 +1,14 @@
+*.ko
+*.o
+*.mod
+*.mod.c
+*.order
+*.symvers
+.*.cmd
+.tmp_versions/
+*.dtb
+*.dtbo
+__pycache__/
+*.pyc
+faceid/howdy-compare-wrapper
+faceid/howdy-cli-wrapper
