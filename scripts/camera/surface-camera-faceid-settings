@@ -1,0 +1,772 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Surface Pro X (SQ2) Camera & Face ID Beheerpaneel
+Volledig Nederlandstalige GTK4 + Libadwaita applicatie
+Ondersteunt:
+ - Voorcamera (5 MP OV5693 via libcamera GPU SoftISP + automatische witte privacy-LED)
+ - Achtercamera (13 MP OV13858 via libcamera GPU SoftISP + automatische witte privacy-LED)
+ - Infraroodcamera / Face ID (VGA OV7251 via V4L2 Y10 + rode IR-strobe + witte privacy-LED)
+"""
+
+import sys
+import os
+import pwd
+import subprocess
+import threading
+import time
+import numpy as np
+import cv2
+
+import gi
+gi.require_version('Gtk', '4.0')
+gi.require_version('Adw', '1')
+from gi.repository import Gtk, Adw, GLib, Gdk, GdkPixbuf
+
+APP_ID = "com.microsoft.surface.camera.settings"
+
+LIBCAM_FRONT_ID = "/base/soc@0/cci@ac4a000/i2c-bus@1/camera@36"
+LIBCAM_REAR_ID = "/base/soc@0/cci@ac4a000/i2c-bus@0/camera@10"
+IR_DEV_PATH = "/dev/video-ir"
+
+
+def _spawn_detached(cmd):
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    threading.Thread(target=proc.wait, daemon=True).start()
+    return proc
+
+
+class SurfaceCameraApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID)
+        self.window = None
+
+    def do_activate(self):
+        if not self.window:
+            self.window = CameraSettingsWindow(self)
+        self.window.present()
+
+
+class CameraSettingsWindow(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="Camera en Gezichtsherkenning")
+        self.set_default_size(880, 700)
+
+        # Stream state
+        self.cap = None
+        self.gst_proc = None
+        self.is_streaming = False
+        self.last_rgb_frame = None
+        self.stream_thread = None
+        self.model_rows = []
+
+        self.setup_ui()
+        self.refresh_howdy_models()
+
+    def setup_ui(self):
+        self.toast_overlay = Adw.ToastOverlay()
+        self.set_content(self.toast_overlay)
+
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.toast_overlay.set_child(main_box)
+
+        header = Adw.HeaderBar()
+        title_widget = Adw.WindowTitle(
+            title="Surface Camera en Face ID",
+            subtitle="Microsoft Surface Pro X (SQ2)"
+        )
+        header.set_title_widget(title_widget)
+        main_box.append(header)
+
+        self.view_stack = Adw.ViewStack()
+
+        page_preview = self.build_preview_page()
+        self.view_stack.add_titled_with_icon(
+            page_preview, "preview", "Live Beelden", "camera-photo-symbolic"
+        )
+
+        page_faceid = self.build_faceid_page()
+        self.view_stack.add_titled_with_icon(
+            page_faceid, "faceid", "Gezichtsherkenning", "avatar-default-symbolic"
+        )
+
+        page_security = self.build_security_page()
+        self.view_stack.add_titled_with_icon(
+            page_security, "security", "Inloggen en Beveiliging", "security-high-symbolic"
+        )
+
+        page_diag = self.build_diag_page()
+        self.view_stack.add_titled_with_icon(
+            page_diag, "diag", "Hardware Status", "utilities-system-monitor-symbolic"
+        )
+
+        switcher = Adw.ViewSwitcher(
+            stack=self.view_stack, policy=Adw.ViewSwitcherPolicy.WIDE
+        )
+        header.set_title_widget(switcher)
+
+        main_box.append(self.view_stack)
+
+    def show_toast(self, text):
+        toast = Adw.Toast.new(text)
+        toast.set_timeout(4)
+        self.toast_overlay.add_toast(toast)
+
+    # ==========================================
+    # PAGINA 1: CAMERA LIVE BEELDEN
+    # ==========================================
+    def build_preview_page(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        box.set_margin_top(16)
+        box.set_margin_bottom(16)
+        box.set_margin_start(24)
+        box.set_margin_end(24)
+
+        sel_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        sel_label = Gtk.Label(label="Selecteer Camera:")
+        sel_label.add_css_class("heading")
+        sel_box.append(sel_label)
+
+        self.cam_dropdown = Gtk.DropDown.new_from_strings([
+            "Voorcamera (5 MP - FFC OV5693 • GPU Pro ISP)",
+            "Achtercamera (13 MP - RFC OV13858 • GPU Pro ISP)",
+            "Infraroodcamera / Face ID (OV7251 + IR LED • Pro ISP)"
+        ])
+        self.cam_dropdown.set_hexpand(True)
+        self.cam_dropdown.connect("notify::selected", self.on_camera_selected)
+        sel_box.append(self.cam_dropdown)
+
+        self.pro_isp_btn = Gtk.ToggleButton(label="Pro ISP & HDR")
+        self.pro_isp_btn.set_active(True)
+        self.pro_isp_btn.set_tooltip_text("4× Supersampling, Bilateral Luma + YCrCb Chroma Denoise, CLAHE HDR & Edge-Coring Sharpening")
+        sel_box.append(self.pro_isp_btn)
+
+        self.mirror_btn = Gtk.ToggleButton(label="Spiegel")
+        self.mirror_btn.set_active(True)
+        self.mirror_btn.set_tooltip_text("Spiegel het camerabeeld horizontaal (selfie-weergave)")
+        sel_box.append(self.mirror_btn)
+
+        self.extra_rot = 0
+        self.rot_btn = Gtk.Button(label="Draai 90°")
+        self.rot_btn.set_tooltip_text("Draai het beeld 90 graden (handig bij tablet-/portretstand)")
+        self.rot_btn.connect("clicked", self.on_rotate_clicked)
+        sel_box.append(self.rot_btn)
+
+        self.toggle_stream_btn = Gtk.Button(label="Start Preview")
+        self.toggle_stream_btn.add_css_class("suggested-action")
+        self.toggle_stream_btn.connect("clicked", self.on_toggle_stream)
+        sel_box.append(self.toggle_stream_btn)
+
+        self.snapshot_btn = Gtk.Button(label="Foto Maken")
+        self.snapshot_btn.set_sensitive(False)
+        self.snapshot_btn.connect("clicked", self.on_take_snapshot)
+        sel_box.append(self.snapshot_btn)
+
+        box.append(sel_box)
+
+        preview_frame = Gtk.Frame()
+        preview_frame.set_vexpand(True)
+        preview_frame.set_hexpand(True)
+        preview_frame.add_css_class("card")
+
+        self.preview_picture = Gtk.Picture()
+        self.preview_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self.preview_picture.set_can_shrink(True)
+        preview_frame.set_child(self.preview_picture)
+        box.append(preview_frame)
+
+        self.info_label = Gtk.Label(
+            label="Privacy-indicator: Camera staat uit (lampjes uitgeschakeld). Druk op 'Start Preview' om live beelden te bekijken."
+        )
+        self.info_label.add_css_class("dim-label")
+        box.append(self.info_label)
+
+        return box
+
+    def on_camera_selected(self, dropdown, param):
+        self.extra_rot = 0
+        if self.is_streaming:
+            self.stop_stream()
+            self.start_stream()
+
+    def on_rotate_clicked(self, btn):
+        self.extra_rot = (self.extra_rot + 1) % 4
+        self.show_toast(f"Rotatie: {self.extra_rot * 90}°")
+
+    def _apply_extra_rotation(self, img):
+        if self.extra_rot == 1:
+            return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+        elif self.extra_rot == 2:
+            return cv2.rotate(img, cv2.ROTATE_180)
+        elif self.extra_rot == 3:
+            return cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return img
+
+    def on_toggle_stream(self, btn):
+        if self.is_streaming:
+            self.stop_stream()
+        else:
+            self.start_stream()
+
+    def _apply_sensor_tuning(self):
+        """Stel optimale lage-ruis sensor-controls in voor maximale scherpte zonder highlight-clipping."""
+        try:
+            for d in os.listdir("/sys/class/video4linux"):
+                if not d.startswith("v4l-subdev"):
+                    continue
+                name_path = f"/sys/class/video4linux/{d}/name"
+                if not os.path.exists(name_path):
+                    continue
+                with open(name_path, "r") as f:
+                    name = f.read().strip()
+                dev = f"/dev/{d}"
+                if name == "ov5693 4-0036":
+                    subprocess.run(["v4l2-ctl", "-d", dev, "--set-ctrl=vertical_blanking=1200"], capture_output=True)
+                    subprocess.run(["v4l2-ctl", "-d", dev, "--set-ctrl=digital_gain=1350,analogue_gain=32,exposure=2400"], capture_output=True)
+                elif name == "ov13858 3-0010":
+                    subprocess.run(["v4l2-ctl", "-d", dev, "--set-ctrl=vertical_blanking=1600"], capture_output=True)
+                    subprocess.run(["v4l2-ctl", "-d", dev, "--set-ctrl=digital_gain=2048,analogue_gain=768,exposure=3200"], capture_output=True)
+                elif name == "ov7251 3-0060":
+                    subprocess.run(["v4l2-ctl", "-d", dev, "--set-ctrl=gain=32,exposure=550,horizontal_flip=0,vertical_flip=0"], capture_output=True)
+        except Exception:
+            pass
+
+    def start_stream(self):
+        self._apply_sensor_tuning()
+        idx = self.cam_dropdown.get_selected()
+        self.is_streaming = True
+        self.last_rgb_frame = None
+        self.toggle_stream_btn.set_label("Stop Preview")
+        self.toggle_stream_btn.remove_css_class("suggested-action")
+        self.toggle_stream_btn.add_css_class("destructive-action")
+        self.snapshot_btn.set_sensitive(True)
+
+        if idx == 0:
+            self.info_label.set_text("Actieve stream: Voorcamera 5 MP • Adreno 685 GPU DebayerEGL + Pro ISP (Witte LED voorop brandt)")
+            self.stream_thread = threading.Thread(
+                target=self._libcamera_stream_worker, args=(LIBCAM_FRONT_ID, 2048, 1536, 1024, 768), daemon=True
+            )
+        elif idx == 1:
+            self.info_label.set_text("Actieve stream: Achtercamera 13 MP • Adreno 685 GPU DebayerEGL + Pro ISP (Witte LED achterop brandt)")
+            self.stream_thread = threading.Thread(
+                target=self._libcamera_stream_worker, args=(LIBCAM_REAR_ID, 2048, 1536, 1024, 768), daemon=True
+            )
+        else:
+            self.info_label.set_text("Actieve stream: Infraroodcamera OV7251 • Hardware Y10 + Pro ISP (Rode IR-illuminator brandt)")
+            self.stream_thread = threading.Thread(
+                target=self._ir_stream_worker, args=(IR_DEV_PATH,), daemon=True
+            )
+        self.stream_thread.start()
+
+    def stop_stream(self):
+        self.is_streaming = False
+        if self.gst_proc:
+            try:
+                self.gst_proc.terminate()
+                self.gst_proc.wait(timeout=2)
+            except Exception:
+                try:
+                    self.gst_proc.kill()
+                except Exception:
+                    pass
+            self.gst_proc = None
+
+        if self.cap:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+
+        self.toggle_stream_btn.set_label("Start Preview")
+        self.toggle_stream_btn.remove_css_class("destructive-action")
+        self.toggle_stream_btn.add_css_class("suggested-action")
+        self.snapshot_btn.set_sensitive(False)
+        self.info_label.set_text("Preview gestopt. Alle camera- en IR-lampjes zijn uit.")
+        self.preview_picture.set_pixbuf(None)
+
+    def _process_pro_isp_rgb(self, rgba_full, out_w, out_h, prev_f, clahe, tone_lut):
+        """
+        Real-time Ultra ISP pijplijn:
+        1. 4x Area Supersampling (2048x1536 -> 1024x768) verlaagt shot-noise met 2x en behoudt volledige groothoek.
+        2. Sterke Motion-adaptive temporele ruisonderdrukking (EMA alpha 0.22..1.0).
+        3. YCrCb piramidale chroma-denoising + Shadow Chroma Desaturation (diepzwarte schaduwen zonder groene/rode korrel).
+        4. Edge-preserving Bilateral Luma Denoising + Soft-Knee S-curve LUT + CLAHE HDR + Edge-Coring Detail Sharpening.
+        """
+        small_rgba = cv2.resize(rgba_full, (out_w, out_h), interpolation=cv2.INTER_AREA)
+        bgr = cv2.cvtColor(small_rgba, cv2.COLOR_RGBA2BGR)
+
+        if self.mirror_btn.get_active():
+            bgr = cv2.flip(bgr, 1)
+        bgr = self._apply_extra_rotation(bgr)
+
+        if not self.pro_isp_btn.get_active():
+            return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), None
+
+        # Motion-adaptive temporal blend (ca. 4.5-frame middeling in statische delen, 0 ghosting bij beweging)
+        curr_f = bgr.astype(np.float32)
+        if prev_f is not None and prev_f.shape == curr_f.shape:
+            diff = np.abs(curr_f - prev_f).mean(axis=2, keepdims=True)
+            alpha = np.clip((diff - 3.5) / 16.0, 0.22, 1.0)
+            blended_f = curr_f * alpha + prev_f * (1.0 - alpha)
+            bgr = blended_f.astype(np.uint8)
+        else:
+            blended_f = curr_f
+
+        ycrcb = cv2.cvtColor(bgr, cv2.COLOR_BGR2YCrCb)
+        y, cr, cb = cv2.split(ycrcb)
+        cur_h, cur_w = y.shape
+
+        # Piramidale chroma-ruisonderdrukking + Shadow Chroma Desaturation op 1/4 resolutie
+        cw, ch = cur_w // 4, cur_h // 4
+        y_s = cv2.resize(y, (cw, ch), interpolation=cv2.INTER_AREA).astype(np.float32)
+        cr_s = cv2.GaussianBlur(cv2.resize(cr, (cw, ch), interpolation=cv2.INTER_AREA), (7, 7), 0).astype(np.float32)
+        cb_s = cv2.GaussianBlur(cv2.resize(cb, (cw, ch), interpolation=cv2.INTER_AREA), (7, 7), 0).astype(np.float32)
+
+        shadow_w = np.clip((y_s - 14.0) / 42.0, 0.0, 1.0) * 1.10
+        cr_s = np.clip(128.0 + (cr_s - 128.0) * shadow_w, 0, 255).astype(np.uint8)
+        cb_s = np.clip(128.0 + (cb_s - 128.0) * shadow_w, 0, 255).astype(np.uint8)
+
+        cr_clean = cv2.resize(cr_s, (cur_w, cur_h), interpolation=cv2.INTER_LINEAR)
+        cb_clean = cv2.resize(cb_s, (cur_w, cur_h), interpolation=cv2.INTER_LINEAR)
+
+        # Edge-preserving Bilateral Luma Denoising + Soft-Knee Tone Curve + CLAHE HDR
+        y_dn = cv2.bilateralFilter(y, 5, 24, 24)
+        y_toned = cv2.LUT(y_dn, tone_lut)
+        y_clahe = clahe.apply(y_toned)
+        y_hdr = cv2.addWeighted(y_toned, 0.65, y_clahe, 0.35, 0)
+
+        # Edge-Coring Detail Sharpening (verscherpt alleen echte randen > 5, nooit ruis op vlakke delen!)
+        y_blur = cv2.GaussianBlur(y_hdr, (0, 0), 1.1)
+        detail = y_hdr.astype(np.int16) - y_blur.astype(np.int16)
+        cored = np.where(np.abs(detail) > 5, detail - np.sign(detail) * 5, 0)
+        y_sharp = np.clip(y_hdr.astype(np.int16) + (cored * 3) // 5, 0, 255).astype(np.uint8)
+
+        rgb = cv2.cvtColor(cv2.merge([y_sharp, cr_clean, cb_clean]), cv2.COLOR_YCrCb2RGB)
+        return rgb, blended_f
+
+    def _libcamera_stream_worker(self, cam_id, cap_w, cap_h, out_w, out_h):
+        cmd = [
+            "gst-launch-1.0", "-q",
+            "libcamerasrc", f"camera-name={cam_id}",
+            "!", f"video/x-raw,format=RGBA,width={cap_w},height={cap_h}",
+            "!", "fdsink", "fd=1"
+        ]
+        env = os.environ.copy()
+        ipa_dir = "/etc/libcamera/ipa"
+        if os.path.isdir(ipa_dir):
+            env["LIBCAMERA_IPA_CONFIG_PATH"] = f"{ipa_dir}:/usr/share/libcamera/ipa"
+
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env
+            )
+            self.gst_proc = proc
+        except Exception as e:
+            GLib.idle_add(self.show_toast, f"Kon libcamera niet starten: {e}")
+            GLib.idle_add(self.stop_stream)
+            return
+
+        clahe = cv2.createCLAHE(clipLimit=1.25, tileGridSize=(8, 8))
+        tone_lut = np.zeros(256, dtype=np.uint8)
+        for i in range(256):
+            x = max(0.0, (i - 8.0) / 247.0)
+            y_val = (x ** 0.94) / (1.0 + 0.14 * (x ** 3.5)) * 1.12
+            tone_lut[i] = int(np.clip(y_val * 255.0, 0, 255))
+
+        prev_f = None
+        frame_bytes = cap_w * cap_h * 4
+        while self.is_streaming and proc.poll() is None:
+            buf = proc.stdout.read(frame_bytes)
+            if not buf or len(buf) < frame_bytes:
+                break
+            rgba = np.frombuffer(buf, dtype=np.uint8).reshape((cap_h, cap_w, 4))
+            rgb, prev_f = self._process_pro_isp_rgb(rgba, out_w, out_h, prev_f, clahe, tone_lut)
+            self.last_rgb_frame = rgb
+            rh, rw, rc = rgb.shape
+            pixbuf = GdkPixbuf.Pixbuf.new_from_data(
+                rgb.tobytes(), GdkPixbuf.Colorspace.RGB, False, 8, rw, rh, rw * rc
+            )
+            GLib.idle_add(self._update_preview, pixbuf)
+
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+    def _ir_stream_worker(self, dev_path):
+        cap = cv2.VideoCapture(dev_path, cv2.CAP_V4L2)
+        self.cap = cap
+        if not cap.isOpened():
+            GLib.idle_add(self.show_toast, f"Kon IR-camera {dev_path} niet openen.")
+            GLib.idle_add(self.stop_stream)
+            return
+
+        clahe = cv2.createCLAHE(clipLimit=1.8, tileGridSize=(8, 8))
+        prev_f = None
+        while self.is_streaming:
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                time.sleep(0.03)
+                continue
+
+            # De OV7251 IR-sensor op de Surface Pro X bezel is fysiek 90° gedraaid (portret-oriëntatie voor groter verticaal Face ID bereik)
+            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            if self.mirror_btn.get_active():
+                frame = cv2.flip(frame, 1)
+            frame = self._apply_extra_rotation(frame)
+
+            if self.pro_isp_btn.get_active():
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                curr_f = gray.astype(np.float32)
+                if prev_f is not None and prev_f.shape == curr_f.shape:
+                    diff = np.abs(curr_f - prev_f)
+                    alpha = np.clip((diff - 3.0) / 14.0, 0.25, 1.0)
+                    blended_f = curr_f * alpha + prev_f * (1.0 - alpha)
+                    gray = blended_f.astype(np.uint8)
+                else:
+                    blended_f = curr_f
+                prev_f = blended_f
+                dn = cv2.bilateralFilter(gray, 5, 20, 20)
+                cl = clahe.apply(dn)
+                hdr = cv2.addWeighted(dn, 0.50, cl, 0.50, 0)
+                blur = cv2.GaussianBlur(hdr, (0, 0), 1.0)
+                detail = hdr.astype(np.int16) - blur.astype(np.int16)
+                cored = np.where(np.abs(detail) > 4, detail - np.sign(detail) * 4, 0)
+                sharp = np.clip(hdr.astype(np.int16) + (cored * 3) // 5, 0, 255).astype(np.uint8)
+                rgb_frame = cv2.cvtColor(sharp, cv2.COLOR_GRAY2RGB)
+            else:
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            self.last_rgb_frame = rgb_frame
+            h, w, c = rgb_frame.shape
+            pixbuf = GdkPixbuf.Pixbuf.new_from_data(
+                rgb_frame.tobytes(), GdkPixbuf.Colorspace.RGB, False, 8, w, h, w * c
+            )
+            GLib.idle_add(self._update_preview, pixbuf)
+            time.sleep(0.025)
+
+        cap.release()
+
+    def _update_preview(self, pixbuf):
+        if self.is_streaming:
+            self.preview_picture.set_pixbuf(pixbuf)
+        return False
+
+    def on_take_snapshot(self, btn):
+        if not self.is_streaming or self.last_rgb_frame is None:
+            return
+        user_pics = os.path.expanduser("~/Afbeeldingen")
+        if not os.path.exists(user_pics):
+            user_pics = os.path.expanduser("~/Pictures")
+        if not os.path.exists(user_pics):
+            user_pics = os.path.expanduser("~")
+
+        filename = os.path.join(user_pics, f"surface_foto_{int(time.time())}.jpg")
+        bgr = cv2.cvtColor(self.last_rgb_frame, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(filename, bgr)
+        self.show_toast(f"Foto opgeslagen: {filename}")
+
+    # ==========================================
+    # PAGINA 2: FACE ID BEHEER
+    # ==========================================
+    def build_faceid_page(self):
+        page = Adw.PreferencesPage()
+
+        grp_act = Adw.PreferencesGroup(title="Gezichtsherkenning (Windows Hello IR)")
+        grp_act.set_description(
+            "Beheer biometrisch inloggen met de infraroodcamera en rode IR-illuminator op Microsoft Surface Pro X."
+        )
+
+        row_add = Adw.ActionRow(
+            title="Nieuw Gezicht Toevoegen",
+            subtitle="Scan uw gezicht direct via de infraroodsensor (kijk in de camera)"
+        )
+        btn_add = Gtk.Button(label="Gezicht Scannen")
+        btn_add.set_valign(Gtk.Align.CENTER)
+        btn_add.add_css_class("suggested-action")
+        btn_add.connect("clicked", self.on_add_face)
+        row_add.add_suffix(btn_add)
+        grp_act.add(row_add)
+
+        row_test = Adw.ActionRow(
+            title="Face ID Direct Verifiëren",
+            subtitle="Test gezichtsherkenning live met de IR-camera en bekijk de match-score"
+        )
+        btn_test = Gtk.Button(label="Nu Verifiëren")
+        btn_test.set_valign(Gtk.Align.CENTER)
+        btn_test.connect("clicked", self.on_test_face)
+        row_test.add_suffix(btn_test)
+        grp_act.add(row_test)
+
+        page.add(grp_act)
+
+        self.grp_models = Adw.PreferencesGroup(title="Geregistreerde Gezichtsmodellen")
+        self.grp_models.set_description("Opgeslagen biometrische IR-profielen voor deze gebruiker.")
+        page.add(self.grp_models)
+
+        return page
+
+    def refresh_howdy_models(self):
+        for r in self.model_rows:
+            self.grp_models.remove(r)
+        self.model_rows.clear()
+
+        user = os.environ.get("SUDO_USER") or os.environ.get("USER") or pwd.getpwuid(os.getuid()).pw_name
+        try:
+            res = subprocess.run(
+                ["sudo", "howdy", "list", "-U", user],
+                capture_output=True, text=True, timeout=5
+            )
+            out = res.stdout.strip()
+        except Exception as e:
+            out = f"Fout bij uitlezen Howdy: {e}"
+
+        models = []
+        for line in out.splitlines():
+            line = line.strip()
+            if line and not line.startswith("ID") and not line.startswith("No face") and not line.startswith("="):
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].isdigit():
+                    models.append((parts[0], " ".join(parts[1:])))
+
+        if not models:
+            row_empty = Adw.ActionRow(
+                title="Geen modellen geregistreerd",
+                subtitle="Druk op 'Gezicht Scannen' hierboven om uw gezicht toe te voegen."
+            )
+            self.grp_models.add(row_empty)
+            self.model_rows.append(row_empty)
+        else:
+            for m_id, m_desc in models:
+                row = Adw.ActionRow(title=f"Profiel #{m_id}: {m_desc}")
+                btn_del = Gtk.Button(label="Verwijderen")
+                btn_del.set_valign(Gtk.Align.CENTER)
+                btn_del.add_css_class("destructive-action")
+                btn_del.connect("clicked", self.on_delete_model, m_id)
+                row.add_suffix(btn_del)
+                self.grp_models.add(row)
+                self.model_rows.append(row)
+
+    def on_add_face(self, btn):
+        if self.is_streaming:
+            self.stop_stream()
+        user = os.environ.get("SUDO_USER") or os.environ.get("USER") or pwd.getpwuid(os.getuid()).pw_name
+        self.show_toast("IR-camera scant nu uw gezicht... Kijk recht naar het rode IR-lampje!")
+
+        def _worker():
+            try:
+                label = f"Surface-IR-{time.strftime('%H:%M')}"
+                res = subprocess.run(
+                    ["sudo", "howdy", "add", "-U", user, "-y", "--plain", label],
+                    capture_output=True, text=True, timeout=10
+                )
+                if res.returncode == 0:
+                    GLib.idle_add(self.show_toast, f"Gezichtsprofiel '{label}' succesvol opgeslagen!")
+                    GLib.idle_add(self.refresh_howdy_models)
+                else:
+                    GLib.idle_add(self.show_toast, "Geen gezicht gedetecteerd. Kijk recht in de camera en probeer opnieuw.")
+            except Exception as e:
+                GLib.idle_add(self.show_toast, f"Fout bij scannen: {e}")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def on_test_face(self, btn):
+        if self.is_streaming:
+            self.stop_stream()
+        user = os.environ.get("SUDO_USER") or os.environ.get("USER") or pwd.getpwuid(os.getuid()).pw_name
+        self.show_toast("IR Face ID verificatie gestart...")
+
+        def _worker():
+            t0 = time.time()
+            try:
+                res = subprocess.run(
+                    ["sudo", "/usr/lib/howdy/howdy-compare", user],
+                    capture_output=True, text=True, timeout=8
+                )
+                dt_ms = int((time.time() - t0) * 1000)
+                if res.returncode == 0:
+                    GLib.idle_add(
+                        self.show_toast,
+                        f"Face ID Geslaagd! Gezicht herkend als '{user}' in {dt_ms} ms."
+                    )
+                else:
+                    GLib.idle_add(
+                        self.show_toast,
+                        f"Gezicht niet herkend (code {res.returncode}). Kijk recht in de IR-camera."
+                    )
+            except Exception as e:
+                GLib.idle_add(self.show_toast, f"Fout bij Face ID test: {e}")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def on_delete_model(self, btn, model_id):
+        user = os.environ.get("SUDO_USER") or os.environ.get("USER") or pwd.getpwuid(os.getuid()).pw_name
+        try:
+            subprocess.run(["sudo", "howdy", "remove", "-U", user, "-y", str(model_id)], check=True)
+            self.show_toast(f"Profiel #{model_id} succesvol verwijderd.")
+            self.refresh_howdy_models()
+        except Exception as e:
+            self.show_toast(f"Fout bij verwijderen: {e}")
+
+    # ==========================================
+    # PAGINA 3: INLOGGEN & BEVEILIGING
+    # ==========================================
+    def build_security_page(self):
+        page = Adw.PreferencesPage()
+
+        grp_login = Adw.PreferencesGroup(title="Inlog- en Authenticatiemethoden")
+        grp_login.set_description("Stel in waar u Face ID wilt gebruiken in plaats van een wachtwoord.")
+
+        self.row_sudo = Adw.SwitchRow(
+            title="Terminal ('sudo' & 'su') met Face ID",
+            subtitle="Gebruik gezichtsherkenning bij beheerderscommando's in de terminal"
+        )
+        self.row_sudo.set_active(self.check_pam_howdy("/etc/pam.d/sudo"))
+        self.row_sudo.connect("notify::active", self.on_toggle_pam, "/etc/pam.d/sudo")
+        grp_login.add(self.row_sudo)
+
+        self.row_gdm = Adw.SwitchRow(
+            title="Inlogscherm en Vergrendelscherm (GDM)",
+            subtitle="Ontgrendel uw Surface automatisch door in de IR-camera te kijken"
+        )
+        self.row_gdm.set_active(self.check_pam_howdy("/etc/pam.d/gdm-password"))
+        self.row_gdm.connect("notify::active", self.on_toggle_pam, "/etc/pam.d/gdm-password")
+        grp_login.add(self.row_gdm)
+
+        self.row_polkit = Adw.SwitchRow(
+            title="Grafische Beheerdersprompts (Polkit)",
+            subtitle="Autoriseer software-installaties en systeeminstellingen met uw gezicht"
+        )
+        self.row_polkit.set_active(self.check_pam_howdy("/etc/pam.d/polkit-1"))
+        self.row_polkit.connect("notify::active", self.on_toggle_pam, "/etc/pam.d/polkit-1")
+        grp_login.add(self.row_polkit)
+
+        self.row_nopasswd = Adw.SwitchRow(
+            title="Wachtwoordloos 'sudo' (Sla Face ID & wachtwoord over)",
+            subtitle="Schakel uit om bij elke 'sudo' in de terminal de rode IR Face ID sensor te activeren"
+        )
+        self.row_nopasswd.set_active(self.check_sudo_nopasswd())
+        self.row_nopasswd.connect("notify::active", self.on_toggle_nopasswd)
+        grp_login.add(self.row_nopasswd)
+
+        page.add(grp_login)
+        return page
+
+    def check_sudo_nopasswd(self):
+        try:
+            res = subprocess.run(["sudo", "-n", "cat", "/etc/sudoers.d/wheel"], capture_output=True, text=True)
+            if res.returncode == 0:
+                return "NOPASSWD:" in res.stdout
+        except Exception:
+            pass
+        return False
+
+    def on_toggle_nopasswd(self, switch_row, param):
+        active = switch_row.get_active()
+        try:
+            if active:
+                _run_privileged("echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/wheel && chmod 0440 /etc/sudoers.d/wheel")
+                self.show_toast("Wachtwoordloos 'sudo' (NOPASSWD) ingeschakeld.")
+            else:
+                _run_privileged("echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/wheel && chmod 0440 /etc/sudoers.d/wheel")
+                self.show_toast("IR Face ID voor 'sudo' in de terminal geactiveerd!")
+        except Exception as e:
+            self.show_toast(f"Fout bij instellen sudoers: {e}")
+
+    def check_pam_howdy(self, path):
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path, 'r') as f:
+                content = f.read()
+            return "pam_howdy.so" in content and not content.strip().startswith("#auth sufficient pam_howdy")
+        except Exception:
+            return False
+
+    def on_toggle_pam(self, switch_row, param, pam_file):
+        active = switch_row.get_active()
+        try:
+            if active:
+                _run_privileged(f"""
+                if ! grep -q "pam_howdy.so" {pam_file}; then
+                    if grep -q "#%PAM-1.0" {pam_file}; then
+                        sed -i '/#%PAM-1.0/a auth       sufficient                  pam_howdy.so' {pam_file}
+                    else
+                        sed -i '1s/^/auth       sufficient                  pam_howdy.so\\n/' {pam_file}
+                    fi
+                fi
+                """)
+                self.show_toast(f"Face ID ingeschakeld voor {os.path.basename(pam_file)}")
+            else:
+                _run_privileged(f"sed -i '/pam_howdy.so/d' {pam_file}")
+                self.show_toast(f"Face ID uitgeschakeld voor {os.path.basename(pam_file)}")
+        except Exception as e:
+            self.show_toast(f"Fout bij instellen PAM: {e}")
+
+    # ==========================================
+    # PAGINA 4: HARDWARE & DIAGNOSE
+    # ==========================================
+    def build_diag_page(self):
+        page = Adw.PreferencesPage()
+
+        grp_hw = Adw.PreferencesGroup(title="Hardware en Sensor Status")
+        grp_hw.set_description("Overzicht van Qualcomm Spectra 390 ISP, MIPI CSI-2 en camera-sensoren.")
+
+        row_sq2 = Adw.ActionRow(title="Platform", subtitle="Qualcomm Snapdragon SC8180X / SQ2 (ARM64)")
+        grp_hw.add(row_sq2)
+
+        self.row_front = Adw.ActionRow(
+            title="Voorcamera (Front RGB)",
+            subtitle="OmniVision OV5693 • 5 MP (2592×1944) • CSIPHY0 → CSID0 → VFE0 (/dev/video-front)"
+        )
+        grp_hw.add(self.row_front)
+
+        self.row_rear = Adw.ActionRow(
+            title="Achtercamera (Rear RGB)",
+            subtitle="OmniVision OV13858 • 13 MP (4224×3136) • CSIPHY2 → CSID1 → VFE1 (/dev/video-rear)"
+        )
+        grp_hw.add(self.row_rear)
+
+        self.row_ir = Adw.ActionRow(
+            title="Infraroodsensor (Front IR / Face ID)",
+            subtitle="OmniVision OV7251 • VGA Y10 • CSIPHY3 → CSID3 → VFE3 (/dev/video-ir)"
+        )
+        grp_hw.add(self.row_ir)
+
+        self.row_led = Adw.ActionRow(
+            title="Privacy- & IR-Indicatoren (3× LED)",
+            subtitle="Wit voorop (GPIO 25), Wit achterop (GPIO 11), Rood IR-strobe (OV7251 0x3005)"
+        )
+        grp_hw.add(self.row_led)
+
+        row_btn_chk = Adw.ActionRow(
+            title="Diagnose & Herconfiguratie Uitvoeren",
+            subtitle="Herstel media-controller links en optimale helderheid via surface-camera-check"
+        )
+        btn_chk = Gtk.Button(label="Controleer Nu")
+        btn_chk.set_valign(Gtk.Align.CENTER)
+        btn_chk.connect("clicked", self.on_run_check)
+        row_btn_chk.add_suffix(btn_chk)
+        grp_hw.add(row_btn_chk)
+
+        page.add(grp_hw)
+        return page
+
+    def on_run_check(self, btn):
+        try:
+            subprocess.run(["sudo", "/usr/local/bin/surface-camera-check"], capture_output=True, text=True, timeout=8, check=True)
+            self.show_toast("Alle 3 de camera's en LED's zijn succesvol gecontroleerd!")
+        except Exception as e:
+            self.show_toast(f"Diagnosefout: {e}")
+
+
+if __name__ == "__main__":
+    app = SurfaceCameraApp()
+    sys.exit(app.run(sys.argv))

@@ -1,0 +1,41 @@
+# Sanitized Howdy configuration for Microsoft Surface Pro X SQ2 (OV7251 IR)
+#
+# Key SQ2 hardware specifics:
+#   - OV7251 is physically mounted rotated 90 degrees portrait on the bezel,
+#     so rotate = 2 (270 deg CW / 90 deg CCW) yields upright 480x640 faces.
+#   - /dev/video-ir is a stable symlink created by surface-camera-check
+#     pointing to msm_vfe3_rdi0 (/dev/video12) configured for unpacked Y10.
+
+[core]
+detection_notice = true
+no_confirmation = false
+suppress_unknown = false
+abort_if_ssh = true
+abort_if_lid_closed = true
+use_cnn = false
+
+[video]
+device_path = /dev/video-ir
+capture_failed = false
+timeout = 5
+dark_threshold = 95
+max_height = 640
+frame_width = 640
+frame_height = 480
+recording_plugin = opencv
+device_format = Y10
+rotate = 2
+force_mjpeg = false
+exposure = -1
+certainty = 3.5
+
+[snapshots]
+capture_failed = false
+capture_successful = false
+
+[debug]
+end_report = false
+
+[recognition]
+sface_threshold = 0.38
+yunet_score_threshold = 0.50
