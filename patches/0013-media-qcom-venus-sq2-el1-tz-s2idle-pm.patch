@@ -1,0 +1,338 @@
+diff --git a/drivers/media/platform/qcom/venus/hfi_venus.h b/drivers/media/platform/qcom/venus/hfi_venus.h
+--- a/drivers/media/platform/qcom/venus/hfi_venus.h
++++ b/drivers/media/platform/qcom/venus/hfi_venus.h
+@@ -9,6 +9,8 @@
+ struct venus_core;
+ 
+ int venus_hfi_prepare_system_stop(struct venus_core *core);
++int venus_hfi_tz_suspend(struct venus_core *core);
++int venus_hfi_tz_resume(struct venus_core *core);
+ void venus_hfi_destroy(struct venus_core *core);
+ int venus_hfi_create(struct venus_core *core);
+ void venus_hfi_queues_reinit(struct venus_core *core);
+diff --git a/drivers/media/platform/qcom/venus/hfi_venus.c b/drivers/media/platform/qcom/venus/hfi_venus.c
+--- a/drivers/media/platform/qcom/venus/hfi_venus.c
++++ b/drivers/media/platform/qcom/venus/hfi_venus.c
+@@ -7,6 +7,7 @@
+ #include <linux/delay.h>
+ #include <linux/device.h>
+ #include <linux/dma-mapping.h>
++#include <linux/firmware/qcom/qcom_pas.h>
+ #include <linux/interrupt.h>
+ #include <linux/iopoll.h>
+ #include <linux/kernel.h>
+@@ -1703,11 +1704,96 @@
+ int venus_hfi_prepare_system_stop(struct venus_core *core)
+ {
+ 	if (!IS_SQ2_HFI(core) || !IS_V4(core) || !core->priv ||
+-	    !core->sq2_no_tz_active || test_bit(0, &core->sys_error))
++	    (!core->sq2_no_tz_active && !core->sq2_secure_active) ||
++	    test_bit(0, &core->sys_error))
+ 		return -EINVAL;
+ 	return venus_suspend_3xx(core, true);
+ }
+ 
++int venus_hfi_tz_suspend(struct venus_core *core)
++{
++	struct venus_hfi_device *hdev = to_hfi_priv(core);
++	int ret;
++
++	if (!IS_SQ2_HFI(core) || !hdev || !core->sq2_secure_active ||
++	    core->sq2_no_tz_active || test_bit(0, &core->sys_error))
++		return -EINVAL;
++
++	mutex_lock(&hdev->lock);
++	if (!hdev->power_enabled) {
++		mutex_unlock(&hdev->lock);
++		return 0;
++	}
++
++	ret = qcom_pas_set_remote_state(0, 0);
++	dev_info(core->dev, "SQ2_TZ_PM set_remote_state(0, 0) ret=%d\n", ret);
++	if (ret) {
++		mutex_unlock(&hdev->lock);
++		return ret;
++	}
++
++	ret = venus_halt_axi(hdev);
++	if (ret) {
++		dev_err(core->dev, "SQ2_TZ_PM halt_axi ret=%d\n", ret);
++		mutex_unlock(&hdev->lock);
++		return ret;
++	}
++
++	hdev->power_enabled = false;
++	hdev->suspended = true;
++	mutex_unlock(&hdev->lock);
++	return 0;
++}
++
++int venus_hfi_tz_resume(struct venus_core *core)
++{
++	struct venus_hfi_device *hdev = to_hfi_priv(core);
++	u32 axi_halt, arg0_pre, arg0_post, cpu_post;
++	int ret, raw;
++
++	if (!IS_SQ2_HFI(core) || !hdev || !core->sq2_secure_active ||
++	    core->sq2_no_tz_active || test_bit(0, &core->sys_error))
++		return -EINVAL;
++
++	mutex_lock(&hdev->lock);
++	if (hdev->power_enabled) {
++		mutex_unlock(&hdev->lock);
++		return 0;
++	}
++
++	axi_halt = readl(core->wrapper_base + WRAPPER_CPU_AXI_HALT);
++	if (axi_halt & WRAPPER_CPU_AXI_HALT_HALT) {
++		writel(axi_halt & ~WRAPPER_CPU_AXI_HALT_HALT,
++		       core->wrapper_base + WRAPPER_CPU_AXI_HALT);
++	}
++	arg0_pre = readl(core->cpu_cs_base + CPU_CS_SCIACMDARG0);
++
++	raw = qcom_pas_set_remote_state(1, 0);
++	ret = (raw == -EINVAL) ? 0 : raw;
++	if (ret) {
++		dev_err(core->dev, "SQ2_TZ_PM set_remote_state(1, 0) ret=%d\n", raw);
++		mutex_unlock(&hdev->lock);
++		return ret;
++	}
++
++	ret = venus_run(hdev);
++	arg0_post = readl(core->cpu_cs_base + CPU_CS_SCIACMDARG0);
++	cpu_post = readl(core->wrapper_base + WRAPPER_CPU_STATUS);
++	dev_info(core->dev,
++		 "SQ2_TZ_PM resume axi_halt=0x%x arg0=0x%x->0x%x cpu=0x%x remote=%d run=%d\n",
++		 axi_halt, arg0_pre, arg0_post, cpu_post, raw, ret);
++	if (ret) {
++		qcom_pas_set_remote_state(0, 0);
++		mutex_unlock(&hdev->lock);
++		return ret;
++	}
++
++	hdev->power_enabled = true;
++	hdev->suspended = false;
++	mutex_unlock(&hdev->lock);
++	return 0;
++}
++
+ static int venus_suspend(struct venus_core *core)
+ {
+ 	if (IS_V3(core) || IS_V4(core) || IS_V6(core))
+diff --git a/drivers/media/platform/qcom/venus/sq2-venus-power.h b/drivers/media/platform/qcom/venus/sq2-venus-power.h
+--- a/drivers/media/platform/qcom/venus/sq2-venus-power.h
++++ b/drivers/media/platform/qcom/venus/sq2-venus-power.h
+@@ -10,5 +10,6 @@
+ #ifdef SQ2_VENUS_SYSTEM_PM
+ int sq2_venus_power_system_quiet(struct sq2_venus_power *owner);
+ int sq2_venus_power_system_restore(struct sq2_venus_power *owner);
++int sq2_venus_power_system_restore_tz(struct sq2_venus_power *owner, bool do_pulse);
+ #endif
+ #endif
+diff --git a/drivers/media/platform/qcom/venus/sq2-venus-power.c b/drivers/media/platform/qcom/venus/sq2-venus-power.c
+--- a/drivers/media/platform/qcom/venus/sq2-venus-power.c
++++ b/drivers/media/platform/qcom/venus/sq2-venus-power.c
+@@ -231,7 +231,7 @@
+  p->system_quiet = true;
+  return 0;
+ }
+-int sq2_venus_power_system_restore(struct sq2_venus_power *p)
++int sq2_venus_power_system_restore_tz(struct sq2_venus_power *p, bool do_pulse)
+ {
+  int i, ret;
+  if (!p || !p->system_quiet || p->enabled || p->powered != 3 ||
+@@ -239,8 +239,10 @@
+  p->system_quiet = false;
+  ret = icc_bulk_set_bw(3, p->icc);
+  if (ret) return ret;
+- ret = pulse(p);
+- if (ret) return ret;
++ if (do_pulse) {
++  ret = pulse(p);
++  if (ret) return ret;
++ }
+  for (i = 0; i < 7; i++) {
+   ret = clk_prepare_enable(p->clk[i]);
+   if (ret) return ret;
+@@ -260,4 +262,8 @@
+  p->ready = true;
+  return 0;
+ }
++int sq2_venus_power_system_restore(struct sq2_venus_power *p)
++{
++ return sq2_venus_power_system_restore_tz(p, true);
++}
+ #endif
+diff --git a/drivers/media/platform/qcom/venus/sq2-venus-platform.h b/drivers/media/platform/qcom/venus/sq2-venus-platform.h
+--- a/drivers/media/platform/qcom/venus/sq2-venus-platform.h
++++ b/drivers/media/platform/qcom/venus/sq2-venus-platform.h
+@@ -22,5 +22,7 @@
+ #ifdef SQ2_VENUS_SYSTEM_PM
+ int sq2_venus_platform_system_quiet(struct sq2_venus_platform *owner);
+ int sq2_venus_platform_system_restore(struct sq2_venus_platform *owner);
++int sq2_venus_platform_system_quiet_tz(struct sq2_venus_platform *owner);
++int sq2_venus_platform_system_restore_tz(struct sq2_venus_platform *owner, bool do_pulse);
+ #endif
+ #endif
+diff --git a/drivers/media/platform/qcom/venus/sq2-venus-platform.c b/drivers/media/platform/qcom/venus/sq2-venus-platform.c
+--- a/drivers/media/platform/qcom/venus/sq2-venus-platform.c
++++ b/drivers/media/platform/qcom/venus/sq2-venus-platform.c
+@@ -157,4 +157,16 @@
+      o->core.sq2_fw_owner || o->core.sq2_secure_active) return -EBUSY;
+  return sq2_venus_power_system_restore(o->power);
+ }
++int sq2_venus_platform_system_quiet_tz(struct sq2_venus_platform *o)
++{
++ if (!o || !o->core.sq2_fw_owner || !o->core.sq2_secure_active ||
++     o->core.sq2_no_tz_active || o->lifetime.quarantined) return -EBUSY;
++ return sq2_venus_power_system_quiet(o->power);
++}
++int sq2_venus_platform_system_restore_tz(struct sq2_venus_platform *o, bool do_pulse)
++{
++ if (!o || !o->core.sq2_fw_owner || !o->core.sq2_secure_active ||
++     o->core.sq2_no_tz_active || o->lifetime.quarantined) return -EBUSY;
++ return sq2_venus_power_system_restore_tz(o->power, do_pulse);
++}
+ #endif
+diff --git a/drivers/media/platform/qcom/venus/venus-sq2-system-pm.h b/drivers/media/platform/qcom/venus/venus-sq2-system-pm.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-system-pm.h
++++ b/drivers/media/platform/qcom/venus/venus-sq2-system-pm.h
+@@ -12,6 +12,13 @@
+ static struct venus_core *sq2_pm_status_core;
+ #include "venus-sq2-avc-export.h"
+ static const char *sq2_pm_stage = "probe";
++static int sq2_tz_pm_mode = 1;
++module_param(sq2_tz_pm_mode, int, 0600);
++static bool sq2_tz_resume_pulse = true;
++module_param(sq2_tz_resume_pulse, bool, 0600);
++static bool sq2_tz_resume_reinit;
++module_param(sq2_tz_resume_reinit, bool, 0600);
++static bool sq2_tz_stopped;
+ static void venus_sq2_pm_publish(struct venus_core *core)
+ {
+  WRITE_ONCE(sq2_pm_status_core, core);
+@@ -59,7 +66,7 @@
+  struct venus_core *core = data;
+  int ret = 0;
+  mutex_lock(&core->lock);
+- if (!core->sq2_no_tz_active) ret = -EOPNOTSUPP;
++ if (!core->sq2_no_tz_active && sq2_tz_pm_mode == 0) ret = -EOPNOTSUPP;
+  else if (test_bit(0, &core->sys_error) || core->state != CORE_INIT ||
+           core->error != HFI_ERR_NONE || !core->priv ||
+           !core->sq2_fw_owner || !core->sq2_secure_active) ret = -EIO;
+@@ -74,10 +81,90 @@
+  return ret;
+ }
+ 
++static int venus_sq2_pm_stop_tz(struct venus_core *core)
++{
++ int ret;
++ if (sq2_tz_pm_mode == 2) {
++  cancel_delayed_work_sync(&core->work);
++  venus_hfi_prepare_system_stop(core);
++  ret = venus_sq2_pm_result(core, "tz-stop:shutdown", venus_sq2_stop_core(core));
++  if (!ret) {
++   sq2_tz_stopped = true;
++   WRITE_ONCE(sq2_pm_stage, "tz-stop:stopped");
++  }
++  return ret;
++ }
++ cancel_delayed_work_sync(&core->work);
++ ret = venus_sq2_pm_result(core, "tz-stop:prepare-pc",
++  venus_hfi_prepare_system_stop(core));
++ if (ret) return ret;
++ ret = venus_sq2_pm_result(core, "tz-stop:irq-disable",
++  sq2_venus_platform_irq(core->sq2_platform, false));
++ if (ret) return ret;
++ cancel_delayed_work_sync(&core->work);
++ ret = venus_sq2_pm_result(core, "tz-stop:recheck-idle", venus_sq2_pm_idle(core));
++ if (ret) {
++  if (ret == -EBUSY) {
++   ret = venus_sq2_pm_result(core, "tz-stop:busy-irq-restore",
++    sq2_venus_platform_irq(core->sq2_platform, true));
++   if (!ret) return SQ2_PM_STOP_UNCHANGED_BUSY;
++  }
++  return ret;
++ }
++ ret = venus_sq2_pm_result(core, "tz-stop:hfi-tz-suspend",
++  venus_hfi_tz_suspend(core));
++ if (ret) {
++  sq2_venus_platform_irq(core->sq2_platform, true);
++  return SQ2_PM_STOP_UNCHANGED_BUSY;
++ }
++ ret = venus_sq2_pm_result(core, "tz-stop:power-quiet",
++  sq2_venus_platform_system_quiet_tz(core->sq2_platform));
++ if (!ret)
++  WRITE_ONCE(sq2_pm_stage, "tz-stop:quiet");
++ return ret;
++}
++
++static int venus_sq2_pm_start_tz(struct venus_core *core)
++{
++ int ret;
++ if (sq2_tz_stopped) return 0;
++ ret = venus_sq2_pm_result(core, "tz-start:power-restore",
++  sq2_venus_platform_system_restore_tz(core->sq2_platform, sq2_tz_resume_pulse));
++ if (ret) goto tz_fail;
++ if (sq2_tz_resume_reinit)
++  venus_hfi_queues_reinit(core);
++ ret = venus_sq2_pm_result(core, "tz-start:hfi-tz-resume",
++  venus_hfi_tz_resume(core));
++ if (ret) goto tz_fail;
++ ret = venus_sq2_pm_result(core, "tz-start:irq-enable",
++  sq2_venus_platform_irq(core->sq2_platform, true));
++ if (ret) goto tz_fail;
++ if (sq2_tz_resume_reinit) {
++  core->state = CORE_UNINIT;
++  ret = venus_sq2_pm_result(core, "tz-start:hfi-init",
++   hfi_core_init(core));
++  if (ret) goto tz_fail;
++ }
++ if (test_bit(0, &core->sys_error)) {
++  ret = venus_sq2_pm_result(core, "tz-start:sys-error", -EIO);
++  goto tz_fail;
++ }
++ WRITE_ONCE(sq2_pm_stage, "tz-start:ready");
++ return 0;
++tz_fail:
++ sq2_venus_platform_irq(core->sq2_platform, false);
++ cancel_delayed_work_sync(&core->work);
++ set_bit(0, &core->sys_error);
++ dev_err(core->dev, "SQ2_TZ_PM resume failed ret=%d; quarantined until reboot\n", ret);
++ return ret;
++}
++
+ static int venus_sq2_pm_stop(void *data)
+ {
+  struct venus_core *core = data;
+  int ret;
++ if (!core->sq2_no_tz_active)
++  return venus_sq2_pm_stop_tz(core);
+  /* STOPPING already excludes new sessions; do not reset a live firmware
+   * before the existing HFI idle/PC_READY handshake has completed. */
+  cancel_delayed_work_sync(&core->work);
+@@ -121,6 +208,8 @@
+ {
+  struct venus_core *core = data;
+  int ret, stop, quiet;
++ if (!core->sq2_no_tz_active)
++  return venus_sq2_pm_start_tz(core);
+  if (core->priv || core->sq2_fw_owner || core->sq2_secure_active)
+   return venus_sq2_pm_result(core, "start:owner-retained", -EUCLEAN);
+  ret = venus_sq2_pm_result(core, "start:power-restore",
+@@ -181,6 +270,7 @@
+  struct venus_core *core = dev_get_drvdata(dev);
+  int ret;
+  if (!IS_SQ2_HFI(core)) return pm_runtime_force_suspend(dev);
++ if (sq2_tz_stopped || sq2_tz_pm_mode == 3) return 0;
+  mutex_lock(&core->pm_lock);
+  ret = sq2_system_pm_suspend(&core->sq2_system_pm, &venus_sq2_system_ops, core);
+  if (ret && core->sq2_system_pm.phase == SQ2_PM_BROKEN)
+@@ -193,6 +283,7 @@
+  struct venus_core *core = dev_get_drvdata(dev);
+  int ret;
+  if (!IS_SQ2_HFI(core)) return pm_runtime_force_resume(dev);
++ if (sq2_tz_stopped || sq2_tz_pm_mode == 3) return 0;
+  mutex_lock(&core->pm_lock);
+  ret = sq2_system_pm_resume(&core->sq2_system_pm, &venus_sq2_system_ops, core);
+  mutex_unlock(&core->pm_lock);

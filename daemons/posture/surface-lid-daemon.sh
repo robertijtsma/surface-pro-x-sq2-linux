@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Surface Pro X Type Cover Posture & Lid Daemon
-# Reads SAM platform hub posture (closed / laptop / tablet), blanks eDP
-# backlight and locks session when closed (avoiding unstable S2idle), and
-# synchronizes GNOME on-screen keyboard + tablet switch state.
+# Reads SAM platform hub posture (closed / laptop / tablet), locks and enters
+# s2idle suspend on lid close (or blanks internal eDP only when docked to an
+# external DisplayPort monitor), and syncs GNOME OSK + tablet switch state.
 # ==============================================================================
 
 get_active_users() {
@@ -98,13 +98,25 @@ while true; do
     if [ "$CANDIDATE_COUNT" -ge "$NEEDED_TICKS" ] && [ "$CANDIDATE_STATE" != "$LAST_APPLIED_STATE" ]; then
         CUR_STATE="$CANDIDATE_STATE"
         if [ "$CUR_STATE" = "closed" ]; then
-            logger -t surface-lid-daemon "Posture: closed -> Screen off, lock session, power-saver"
             set_tablet_switch_inhibit 0
             run_user_gsettings_if_changed org.gnome.desktop.a11y.applications screen-keyboard-enabled false
-            loginctl lock-sessions 2>/dev/null || true
-            powerprofilesctl set power-saver 2>/dev/null || true
-            if [ -w /sys/class/backlight/backlight/bl_power ]; then
-                echo 4 > /sys/class/backlight/backlight/bl_power 2>/dev/null || true
+            DOCKED=0
+            for _dp in /sys/class/drm/card*-DP-*/status; do
+                if [ -r "$_dp" ] && grep -qx connected "$_dp" 2>/dev/null; then
+                    DOCKED=1
+                    break
+                fi
+            done
+            if [ "$DOCKED" -eq 1 ]; then
+                logger -t surface-lid-daemon "Posture: closed (docked) -> Internal backlight off only"
+                if [ -w /sys/class/backlight/backlight/bl_power ]; then
+                    echo 4 > /sys/class/backlight/backlight/bl_power 2>/dev/null || true
+                fi
+            else
+                logger -t surface-lid-daemon "Posture: closed -> Lock & s2idle suspend"
+                loginctl lock-sessions 2>/dev/null || true
+                powerprofilesctl set power-saver 2>/dev/null || true
+                systemctl suspend 2>/dev/null || true
             fi
         elif [ "$CUR_STATE" = "laptop" ]; then
             logger -t surface-lid-daemon "Posture: laptop -> Laptop Mode active"

@@ -99,7 +99,7 @@ sudo install -m 755 daemons/pen/surface-pen-bluetooth-autoconnect /usr/local/bin
 sudo cp configs/udev/*.rules /etc/udev/rules.d/
 sudo cp configs/iptsd/iptsd.conf /etc/iptsd.conf
 sudo mkdir -p /etc/systemd/sleep.conf.d /etc/systemd/logind.conf.d
-sudo cp configs/systemd/surface-no-deep-suspend.conf /etc/systemd/sleep.conf.d/
+sudo cp configs/systemd/surface-s2idle.conf /etc/systemd/sleep.conf.d/
 sudo cp configs/systemd/surface-lid.conf /etc/systemd/logind.conf.d/
 sudo cp systemd/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -270,6 +270,43 @@ sudo systemctl enable surface-lte-setup.service ModemManager.service
 ```
 
 After rebooting, `mmcli -L` and NetworkManager (`qrtr0` / `rmnet_ipa0`) expose the Snapdragon X24 4G LTE modem with SIM/eSIM support and QMAP multiplexed bearers (`qmapmux0.0`).
+
+## 11. S2idle Deep Sleep (`drm/msm`, Venus EL1 TZ PM, `spi-hid` PM & `systemd` Hooks)
+
+See [`docs/S2IDLE_SUSPEND.md`](S2IDLE_SUSPEND.md) for architecture notes, wake sources, and verified post-resume hardware checks.
+
+1. **Apply the `s2idle` kernel patches and rebuild `msm.ko`, `venus-core.ko`, and `spi-hid.ko`**:
+
+```bash
+# In your Linux v7.3 kernel tree (with patches/0006, 0007, 0010 already applied):
+git apply patches/0012-drm-msm-sc8180x-dpu-dp-s2idle-resume.patch
+git apply patches/0013-media-qcom-venus-sq2-el1-tz-s2idle-pm.patch
+git apply patches/0014-hid-spi-hid-add-s2idle-system-pm-ops.patch
+
+# Or build the updated out-of-tree spi-hid module directly:
+make -C drivers/spi_hid && sudo make -C drivers/spi_hid install
+sudo depmod -a
+
+# If msm.ko is packed inside your early initramfs (e.g. Plymouth), regenerate initramfs
+# after installing the updated msm.ko.
+```
+
+2. **Install `s2idle` configs, sleep hooks, and updated `iptsd` / `ModemManager` / lid scripts**:
+
+```bash
+sudo rm -f /etc/systemd/sleep.conf.d/surface-no-deep-suspend.conf
+sudo install -Dm644 configs/systemd/surface-s2idle.conf /etc/systemd/sleep.conf.d/surface-s2idle.conf
+sudo install -Dm644 configs/systemd/surface-lid.conf /etc/systemd/logind.conf.d/surface-lid.conf
+sudo install -m 755 systemd/system-sleep/*.sh /usr/lib/systemd/system-sleep/
+sudo install -m 755 daemons/iptsd/start-surface-iptsd.sh /usr/local/bin/
+sudo install -m 755 daemons/posture/surface-lid-daemon.sh /usr/local/bin/
+sudo install -Dm644 systemd/ModemManager.service.d/10-after-surface-lte.conf \
+    /etc/systemd/system/ModemManager.service.d/10-after-surface-lte.conf
+sudo systemctl daemon-reload
+sudo systemctl restart ModemManager.service surface-lid-daemon.service
+```
+
+After rebooting, verify `busctl get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CanSuspend` returns `s "yes"`, and close/open the Type Cover (or press the power button) to test `s2idle` suspend and instant Hall-sensor wake.
 
 
 

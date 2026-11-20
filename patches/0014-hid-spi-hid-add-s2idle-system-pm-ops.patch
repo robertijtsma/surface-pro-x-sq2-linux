@@ -1,0 +1,117 @@
+diff --git a/drivers/hid/spi-hid/spi-hid-core.c b/drivers/hid/spi-hid/spi-hid-core.c
+--- a/drivers/hid/spi-hid/spi-hid-core.c
++++ b/drivers/hid/spi-hid/spi-hid-core.c
+@@ -1085,6 +1085,7 @@
+ 
+ 	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
+ 	if (!shid->irq_enabled) {
++		irq_set_irqchip_state(spi->irq, IRQCHIP_STATE_PENDING, false);
+ 		enable_irq(spi->irq);
+ 		shid->irq_enabled = true;
+ 	} else {
+@@ -1515,6 +1516,97 @@
+ 	spi_hid_stop_hid(shid);
+ }
+ 
++#ifdef CONFIG_PM_SLEEP
++static int spi_hid_suspend(struct device *dev)
++{
++	struct spi_device *spi = to_spi_device(dev);
++	struct spi_hid *shid = spi_get_drvdata(spi);
++	unsigned long flags;
++	int ret;
++
++	if (shid->irq_enabled) {
++		disable_irq(spi->irq);
++		shid->irq_enabled = false;
++	}
++
++	spin_lock_irqsave(&shid->input_lock, flags);
++	shid->power_state = SPI_HID_POWER_MODE_OFF;
++	shid->input_stage = SPI_HID_INPUT_STAGE_IDLE;
++	shid->input_transfer_pending = 0;
++	spin_unlock_irqrestore(&shid->input_lock, flags);
++
++	cancel_work_sync(&shid->error_work);
++	cancel_work_sync(&shid->reset_work);
++	cancel_work_sync(&shid->refresh_device_work);
++	cancel_work_sync(&shid->create_device_work);
++
++	shid->ready = false;
++	sysfs_notify(&dev->kobj, NULL, "ready");
++
++	ret = spi_hid_power_down(shid);
++	if (ret) {
++		dev_err(dev, "%s: failed to power down: %d\n", __func__, ret);
++		return ret;
++	}
++
++	return 0;
++}
++
++static int spi_hid_resume(struct device *dev)
++{
++	struct spi_device *spi = to_spi_device(dev);
++	struct spi_hid *shid = spi_get_drvdata(spi);
++	int ret;
++
++	ret = spi_hid_assert_reset(shid);
++	if (ret) {
++		dev_err(dev, "%s: failed to assert reset: %d\n", __func__, ret);
++		return ret;
++	}
++
++	ret = spi_hid_power_up(shid);
++	if (ret) {
++		dev_err(dev, "%s: could not power up: %d\n", __func__, ret);
++		goto err_sleep;
++	}
++
++	/* Drive reset for at least 100 ms while powered so rails stabilize */
++	msleep(100);
++
++	shid->attempts = 0;
++	shid->input_stage = SPI_HID_INPUT_STAGE_IDLE;
++	shid->input_transfer_pending = 0;
++	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
++
++	if (!shid->irq_enabled) {
++		irq_set_irqchip_state(spi->irq, IRQCHIP_STATE_PENDING, false);
++		enable_irq(spi->irq);
++		shid->irq_enabled = true;
++	}
++
++	ret = spi_hid_deassert_reset(shid);
++	if (ret) {
++		dev_err(dev, "%s: failed to deassert reset: %d\n", __func__, ret);
++		goto err_irq;
++	}
++
++	return 0;
++
++err_irq:
++	if (shid->irq_enabled) {
++		disable_irq(spi->irq);
++		shid->irq_enabled = false;
++	}
++	spi_hid_power_down(shid);
++err_sleep:
++	shid->power_state = SPI_HID_POWER_MODE_OFF;
++	pinctrl_select_state(shid->pinctrl, shid->pinctrl_sleep);
++	return ret;
++}
++#endif
++
++static SIMPLE_DEV_PM_OPS(spi_hid_pm_ops, spi_hid_suspend, spi_hid_resume);
++
+ static const struct spi_device_id spi_hid_id_table[] = {
+ 	{ "hid", 0 },
+ 	{ "hid-over-spi", 0 },
+@@ -1527,6 +1619,7 @@
+ 		.name	= "spi_hid",
+ 		.owner	= THIS_MODULE,
+ 		.of_match_table = of_match_ptr(spi_hid_of_match),
++		.pm	= &spi_hid_pm_ops,
+ 	},
+ 	.probe		= spi_hid_probe,
+ 	.remove		= spi_hid_remove,
