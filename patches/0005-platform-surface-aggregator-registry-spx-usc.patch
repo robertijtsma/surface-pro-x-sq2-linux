@@ -1,0 +1,31 @@
+From: Val Packett <val@packett.cool>
+Subject: [PATCH] platform/surface: aggregator_registry: register USB-C controller on Surface Pro X
+
+Register the SSAM USB-C port controller node (ssam:01:1b:01:01:00, target
+category USC = 0x1b) in ssam_node_group_spx[] on Surface Pro X so the
+surface_typec driver binds automatically while preserving all existing
+KIP / Type Cover / battery / thermal / RTC nodes.
+
+--- a/drivers/platform/surface/surface_aggregator_registry.c
++++ b/drivers/platform/surface/surface_aggregator_registry.c
+@@ -227,6 +227,12 @@ static const struct software_node ssam_node_tmp_perf_profile = {
+ 	.parent = &ssam_node_root,
+ };
+ 
++/* USB Type-C ports. */
++static const struct software_node ssam_node_typec = {
++	.name = "ssam:01:1b:01:01:00",
++	.parent = &ssam_node_root,
++};
++
+ /*
+  * Devices for 5th- and 6th-generations models:
+  * - Surface Book 2,
+@@ -367,6 +373,7 @@ static const struct software_node *ssam_node_group_spx[] = {
+ 	&ssam_node_bat_main,
+ 	// TODO: platform profile
+ 	&ssam_node_tmp_sensors,
++	&ssam_node_typec,
+ 	&ssam_node_kip_tablet_switch,
+ 	&ssam_node_hid_kip_keyboard,
+ 	&ssam_node_hid_kip_penstash,

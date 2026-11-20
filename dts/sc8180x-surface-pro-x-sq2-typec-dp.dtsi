@@ -1,0 +1,123 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Microsoft Surface Pro X SQ2 (Qualcomm SC8180X)
+ * USB Type-C connectors (SSAM-managed orientation + DisplayPort Alt Mode)
+ *
+ * Based on Val Packett's sc8180x-microsoft-surface-pro-x.dtsi work in
+ * linux-qclaptops (uwu-next).
+ */
+
+&mdss_dp0 {
+	status = "okay";
+};
+
+&mdss_dp0_out {
+	data-lanes = <0 1>;
+	remote-endpoint = <&usb_prim_qmpphy_dp_in>;
+};
+
+&mdss_dp1 {
+	status = "okay";
+};
+
+&mdss_dp1_out {
+	data-lanes = <0 1>;
+	remote-endpoint = <&usb_sec_qmpphy_dp_in>;
+};
+
+&uart15 {
+	embedded-controller {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		/* Lower USB-C port */
+		connector@0 {
+			compatible = "usb-c-connector";
+			reg = <0>;
+			power-role = "sink";
+			data-role = "host";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+
+					sam_usc0_hs_in: endpoint {
+						remote-endpoint = <&usb_prim_dwc3_hs>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+
+					sam_usc0_ss_in: endpoint {
+						remote-endpoint = <&usb_prim_qmpphy_out>;
+					};
+				};
+			};
+		};
+
+		/* Upper USB-C port */
+		connector@1 {
+			compatible = "usb-c-connector";
+			reg = <1>;
+			power-role = "sink";
+			data-role = "host";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+
+					sam_usc1_hs_in: endpoint {
+						remote-endpoint = <&usb_sec_dwc3_hs>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+
+					sam_usc1_ss_in: endpoint {
+						remote-endpoint = <&usb_sec_qmpphy_out>;
+					};
+				};
+			};
+		};
+	};
+};
+
+&usb_prim_dwc3_hs {
+	remote-endpoint = <&sam_usc0_hs_in>;
+};
+
+&usb_prim_qmpphy {
+	orientation-switch;
+};
+
+&usb_prim_qmpphy_dp_in {
+	remote-endpoint = <&mdss_dp0_out>;
+};
+
+&usb_prim_qmpphy_out {
+	remote-endpoint = <&sam_usc0_ss_in>;
+};
+
+&usb_sec_dwc3_hs {
+	remote-endpoint = <&sam_usc1_hs_in>;
+};
+
+&usb_sec_qmpphy {
+	orientation-switch;
+};
+
+&usb_sec_qmpphy_dp_in {
+	remote-endpoint = <&mdss_dp1_out>;
+};
+
+&usb_sec_qmpphy_out {
+	remote-endpoint = <&sam_usc1_ss_in>;
+};

@@ -226,13 +226,13 @@ class CameraSettingsWindow(Adw.ApplicationWindow):
                 with open(name_path, "r") as f:
                     name = f.read().strip()
                 dev = f"/dev/{d}"
-                if name == "ov5693 4-0036":
+                if name.startswith("ov5693 "):
                     subprocess.run(["v4l2-ctl", "-d", dev, "--set-ctrl=vertical_blanking=1200"], capture_output=True)
                     subprocess.run(["v4l2-ctl", "-d", dev, "--set-ctrl=digital_gain=1350,analogue_gain=32,exposure=2400"], capture_output=True)
-                elif name == "ov13858 3-0010":
+                elif name.startswith("ov13858 "):
                     subprocess.run(["v4l2-ctl", "-d", dev, "--set-ctrl=vertical_blanking=1600"], capture_output=True)
                     subprocess.run(["v4l2-ctl", "-d", dev, "--set-ctrl=digital_gain=2048,analogue_gain=768,exposure=3200"], capture_output=True)
-                elif name == "ov7251 3-0060":
+                elif name.startswith("ov7251 "):
                     subprocess.run(["v4l2-ctl", "-d", dev, "--set-ctrl=gain=32,exposure=550,horizontal_flip=0,vertical_flip=0"], capture_output=True)
         except Exception:
             pass

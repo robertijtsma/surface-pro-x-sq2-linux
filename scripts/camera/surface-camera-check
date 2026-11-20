@@ -24,8 +24,17 @@ if [ -z "$FRONT_DEV" ] || [ -z "$REAR_DEV" ] || [ -z "$IR_DEV" ] || \
     exit 1
 fi
 
+# Resolve CCI I2C bus addresses dynamically (shifts when DP AUX I2C adapters are registered)
+OV5693_I2C="$(basename "$(ls -d /sys/bus/i2c/devices/*-0036 2>/dev/null | head -n1)")"
+OV13858_I2C="$(basename "$(ls -d /sys/bus/i2c/devices/*-0010 2>/dev/null | head -n1)")"
+OV7251_I2C="$(basename "$(ls -d /sys/bus/i2c/devices/*-0060 2>/dev/null | head -n1)")"
+if [ -z "$OV5693_I2C" ] || [ -z "$OV13858_I2C" ] || [ -z "$OV7251_I2C" ]; then
+    echo "[-] Failed to resolve camera sensor I2C devices (ov5693=$OV5693_I2C ov13858=$OV13858_I2C ov7251=$OV7251_I2C)."
+    exit 1
+fi
+
 # 0. Keep OV7251 and OV13858 out of runtime suspend (OV5693 is resumed below after setting 2592x1944)
-for i2c_dev in 3-0060 3-0010; do
+for i2c_dev in "$OV7251_I2C" "$OV13858_I2C"; do
     if [ -w "/sys/bus/i2c/devices/$i2c_dev/power/control" ]; then
         echo on > "/sys/bus/i2c/devices/$i2c_dev/power/control"
     fi
@@ -35,32 +44,32 @@ done
 media-ctl -d "$MEDIA_DEV" -r
 
 # 2. Configure proven physical CSIPHY -> CSID -> VFE RDI0 routes on Surface Pro X SQ2
-# Front RGB 5 MP (ov5693 4-0036 -> csiphy0 -> csid0 -> vfe0_rdi0 -> msm_vfe0_video0)
+# Front RGB 5 MP (ov5693 -> csiphy0 -> csid0 -> vfe0_rdi0 -> msm_vfe0_video0)
 media-ctl -d "$MEDIA_DEV" -l '"msm_csiphy0":1->"msm_csid0":0[1]'
 media-ctl -d "$MEDIA_DEV" -l '"msm_csid0":1->"msm_vfe0_rdi0":0[1]'
 
-# Rear RGB 13 MP (ov13858 3-0010 -> csiphy2 -> csid1 -> vfe1_rdi0 -> msm_vfe1_video0)
+# Rear RGB 13 MP (ov13858 -> csiphy2 -> csid1 -> vfe1_rdi0 -> msm_vfe1_video0)
 media-ctl -d "$MEDIA_DEV" -l '"msm_csiphy2":1->"msm_csid1":0[1]'
 media-ctl -d "$MEDIA_DEV" -l '"msm_csid1":1->"msm_vfe1_rdi0":0[1]'
 
-# Front IR VGA (ov7251 3-0060 -> csiphy3 -> csid3 -> vfe3_rdi0 -> msm_vfe3_video0)
+# Front IR VGA (ov7251 -> csiphy3 -> csid3 -> vfe3_rdi0 -> msm_vfe3_video0)
 media-ctl -d "$MEDIA_DEV" -l '"msm_csiphy3":1->"msm_csid3":0[1]'
 media-ctl -d "$MEDIA_DEV" -l '"msm_csid3":1->"msm_vfe3_rdi0":0[1]'
 
 # 3. Sensor native formats
-media-ctl -d "$MEDIA_DEV" -V '"ov5693 4-0036":0[fmt:SBGGR10_1X10/2592x1944]'
-media-ctl -d "$MEDIA_DEV" -V '"ov13858 3-0010":0[fmt:SGRBG10_1X10/4224x3136]'
-media-ctl -d "$MEDIA_DEV" -V '"ov7251 3-0060":0[fmt:Y10_1X10/640x480]'
+media-ctl -d "$MEDIA_DEV" -V "\"ov5693 ${OV5693_I2C}\":0[fmt:SBGGR10_1X10/2592x1944]"
+media-ctl -d "$MEDIA_DEV" -V "\"ov13858 ${OV13858_I2C}\":0[fmt:SGRBG10_1X10/4224x3136]"
+media-ctl -d "$MEDIA_DEV" -V "\"ov7251 ${OV7251_I2C}\":0[fmt:Y10_1X10/640x480]"
 
 # 3b. OV5693 writes global and mode registers only in runtime_resume(); ensure one
 # suspend -> resume cycle after configuring 2592x1944, then keep it in standby.
-if [ -w /sys/bus/i2c/devices/4-0036/power/control ]; then
-    echo auto > /sys/bus/i2c/devices/4-0036/power/control
+if [ -w "/sys/bus/i2c/devices/$OV5693_I2C/power/control" ]; then
+    echo auto > "/sys/bus/i2c/devices/$OV5693_I2C/power/control"
     for _ in $(seq 1 30); do
-        [ "$(cat /sys/bus/i2c/devices/4-0036/power/runtime_status 2>/dev/null)" = "suspended" ] && break
+        [ "$(cat "/sys/bus/i2c/devices/$OV5693_I2C/power/runtime_status" 2>/dev/null)" = "suspended" ] && break
         sleep 0.1
     done
-    echo on > /sys/bus/i2c/devices/4-0036/power/control
+    echo on > "/sys/bus/i2c/devices/$OV5693_I2C/power/control"
 fi
 
 # 4. Internal CAMSS pad formats
@@ -99,15 +108,15 @@ for sys_sd in /sys/class/video4linux/v4l-subdev*; do
     sd_name="$(cat "$sys_sd/name")"
     sd_dev="/dev/$(basename "$sys_sd")"
     case "$sd_name" in
-        "ov5693 4-0036")
+        ov5693\ *)
             v4l2-ctl -d "$sd_dev" --set-ctrl=vertical_blanking=1200 || true
             v4l2-ctl -d "$sd_dev" --set-ctrl=digital_gain=1350,analogue_gain=32,exposure=2400 || true
             ;;
-        "ov13858 3-0010")
+        ov13858\ *)
             v4l2-ctl -d "$sd_dev" --set-ctrl=vertical_blanking=1600 || true
             v4l2-ctl -d "$sd_dev" --set-ctrl=digital_gain=2048,analogue_gain=768,exposure=3200 || true
             ;;
-        "ov7251 3-0060")
+        ov7251\ *)
             v4l2-ctl -d "$sd_dev" --set-ctrl=gain=32,exposure=550,horizontal_flip=0,vertical_flip=0 || true
             ;;
     esac

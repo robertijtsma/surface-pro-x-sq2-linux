@@ -1,0 +1,179 @@
+--- a/sc8180x-surface-pro-x-cam-slpi.dts
++++ b/sc8180x-surface-pro-x-cam-slpi-typec.dts
+@@ -1700,6 +1700,68 @@
+ 					pinctrl-0 = <0x42>;
+ 					pinctrl-names = "default";
+ 					current-speed = "", "=\t";
++					#address-cells = <0x01>;
++					#size-cells = <0x00>;
++
++					connector@0 {
++						compatible = "usb-c-connector";
++						reg = <0x00>;
++						power-role = "sink";
++						data-role = "host";
++
++						ports {
++							#address-cells = <0x01>;
++							#size-cells = <0x00>;
++
++							port@0 {
++								reg = <0x00>;
++
++								endpoint {
++									remote-endpoint = <0xec>;
++									phandle = <0xe8>;
++								};
++							};
++
++							port@1 {
++								reg = <0x01>;
++
++								endpoint {
++									remote-endpoint = <0xee>;
++									phandle = <0xe9>;
++								};
++							};
++						};
++					};
++
++					connector@1 {
++						compatible = "usb-c-connector";
++						reg = <0x01>;
++						power-role = "sink";
++						data-role = "host";
++
++						ports {
++							#address-cells = <0x01>;
++							#size-cells = <0x00>;
++
++							port@0 {
++								reg = <0x00>;
++
++								endpoint {
++									remote-endpoint = <0xed>;
++									phandle = <0xea>;
++								};
++							};
++
++							port@1 {
++								reg = <0x01>;
++
++								endpoint {
++									remote-endpoint = <0xf0>;
++									phandle = <0xeb>;
++								};
++							};
++						};
++					};
+ 				};
+ 			};
+ 		};
+@@ -2538,6 +2600,7 @@
+ 			status = "okay";
+ 			vdda-phy-supply = <0x49>;
+ 			vdda-pll-supply = <0x5b>;
++			orientation-switch;
+ 			phandle = <0x65>;
+ 
+ 			ports {
+@@ -2548,6 +2611,8 @@
+ 					reg = <0x00>;
+ 
+ 					endpoint {
++						remote-endpoint = <0xe9>;
++						phandle = <0xee>;
+ 					};
+ 				};
+ 
+@@ -2564,6 +2629,8 @@
+ 					reg = <0x02>;
+ 
+ 					endpoint {
++						remote-endpoint = <0xf2>;
++						phandle = <0xef>;
+ 					};
+ 				};
+ 			};
+@@ -2615,6 +2682,7 @@
+ 			status = "okay";
+ 			vdda-phy-supply = <0x49>;
+ 			vdda-pll-supply = <0x5b>;
++			orientation-switch;
+ 			phandle = <0x68>;
+ 
+ 			ports {
+@@ -2625,6 +2693,8 @@
+ 					reg = <0x00>;
+ 
+ 					endpoint {
++						remote-endpoint = <0xeb>;
++						phandle = <0xf0>;
+ 					};
+ 				};
+ 
+@@ -2641,6 +2711,8 @@
+ 					reg = <0x02>;
+ 
+ 					endpoint {
++						remote-endpoint = <0xf3>;
++						phandle = <0xf1>;
+ 					};
+ 				};
+ 			};
+@@ -2735,6 +2807,8 @@
+ 						reg = <0x00>;
+ 
+ 						endpoint {
++							remote-endpoint = <0xe8>;
++							phandle = <0xec>;
+ 						};
+ 					};
+ 
+@@ -2790,6 +2864,8 @@
+ 						reg = <0x00>;
+ 
+ 						endpoint {
++							remote-endpoint = <0xea>;
++							phandle = <0xed>;
+ 						};
+ 					};
+ 
+@@ -3427,7 +3503,7 @@
+ 				#sound-dai-cells = <0x00>;
+ 				operating-points-v2 = <0x7d>;
+ 				power-domains = <0x22 0x06>;
+-				status = "disabled";
++				status = "okay";
+ 
+ 				ports {
+ 					#address-cells = <0x01>;
+@@ -3446,6 +3522,9 @@
+ 						reg = <0x01>;
+ 
+ 						endpoint {
++							data-lanes = <0x00 0x01>;
++							remote-endpoint = <0xef>;
++							phandle = <0xf2>;
+ 						};
+ 					};
+ 				};
+@@ -3490,7 +3569,7 @@
+ 				#sound-dai-cells = <0x00>;
+ 				operating-points-v2 = <0x7d>;
+ 				power-domains = <0x22 0x06>;
+-				status = "disabled";
++				status = "okay";
+ 
+ 				ports {
+ 					#address-cells = <0x01>;
+@@ -3509,6 +3588,9 @@
+ 						reg = <0x01>;
+ 
+ 						endpoint {
++							data-lanes = <0x00 0x01>;
++							remote-endpoint = <0xf1>;
++							phandle = <0xf3>;
+ 						};
+ 					};
+ 				};

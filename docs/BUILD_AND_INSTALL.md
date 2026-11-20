@@ -147,3 +147,25 @@ sudo udevadm control --reload-rules
 
 After rebooting into the SLPI-enabled DTB, `monitor-sensor` reports live accelerometer orientation and compass heading, and GNOME automatically rotates the display when the Type Cover is folded back or detached.
 
+## 7. USB-C Orientation & DisplayPort Alt Mode (`surface_typec`)
+
+On the Surface Pro X, USB Type-C cable orientation and DisplayPort Alt Mode HPD events are managed by the Surface System Aggregator Module (SSAM, target category `USC = 0x1b`).
+
+1. **Apply the SSAM registry patch and build `surface_typec`**:
+
+```bash
+# Apply patches/0005-platform-surface-aggregator-registry-spx-usc.patch to
+# drivers/platform/surface/surface_aggregator_registry.c (preserving ssam_node_group_spx[]
+# for Type Cover, touchpad, tablet mode switch, battery, RTC, and thermal sensors).
+
+make -C drivers/surface_typec && sudo make -C drivers/surface_typec install
+```
+
+2. **Apply the USB-C / DisplayPort DTB nodes**:
+   - Include [`dts/sc8180x-surface-pro-x-sq2-typec-dp.dtsi`](../dts/sc8180x-surface-pro-x-sq2-typec-dp.dtsi) (or apply [`dts/typec-dp-against-slpi.patch`](../dts/typec-dp-against-slpi.patch)) to wire `connector@0` and `connector@1` under `embedded-controller`, add `orientation-switch;` to `usb_prim_qmpphy` and `usb_sec_qmpphy`, and enable `mdss_dp0` (`ae90000`) and `mdss_dp1` (`ae98000`) with `data-lanes = <0 1>`.
+
+3. **Early `initramfs` module ordering**:
+   - When `mdss_dp0` and `mdss_dp1` are enabled in DT, `msm_dpu` waits for all three DisplayPort sub-components (`ae90000`, `ae98000`, `ae9a000`) before binding the internal eDP panel.
+   - If `dispcc_sm8250` and `msm` are included in early `initramfs` (e.g. for Plymouth boot splash), include `surface_aggregator`, `surface_aggregator_registry`, and `surface_typec` before `dispcc_sm8250` and `msm` in `MODULES=(...)` so the DP HPD bridges are registered before `msm_dpu` probes.
+
+

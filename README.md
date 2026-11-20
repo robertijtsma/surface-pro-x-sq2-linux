@@ -18,6 +18,7 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 | **Touchscreen & Slim Pen 2 (IPTS)** | Working | `iptsd` 3.1.1 calibrated MPP2 thresholds (`configs/iptsd/iptsd.conf`), tilt, pressure, side button, palm rejection |
 | **Slim Pen 2 BLE Auto-Connect** | Experimental | Best-effort BlueZ LE/contact daemons (`daemons/pen/`); core IPTS drawing/hover works independently without BLE |
 | **Display & Adreno 685 GPU** | Working | `eDP` 2880×1920, Freedreno/Turnip with `noubwc` (`libcamera/environment.d/99-surface-gpu.conf`) |
+| **USB-C Orientation & DisplayPort Alt Mode** | Working | `surface_typec` (`drivers/surface_typec/`) + `patches/0005` SSAM registry + QMP combo PHY `orientation-switch` & `mdss_dp0`/`mdss_dp1` (`card0-DP-1`/`card0-DP-2`) |
 | **Ambient Light Sensor (`TCS3430`)** | Working | Direct `/dev/i2c-0` `0x39` adaptive brightness daemon (`daemons/display/surface-auto-brightness`) |
 | **Accelerometer, Compass & Auto-Rotation (`SLPI`)** | Working | `remoteproc_slpi` + FastRPC (`dts/sc8180x-surface-pro-x-sq2-slpi.dtsi`), `hexagonrpcd`, `libssc`, `iio-sensor-proxy` (`LSM6DSO` + `AK0991x`) |
 | **Type Cover, Posture & Lid Handling** | Working | SAM posture daemon (`closed`/`laptop`/`tablet`), eDP blank + lock on close (`daemons/posture/surface-lid-daemon.sh`) |
@@ -42,9 +43,9 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 ## Repository Layout
 
 ```text
-patches/    Clean Linux v7.3 patches (ov13858, ov7251, portable camss LEDs/RDI, full SC8180X camss)
-dts/        Symbolic SC8180X SQ2 camera DTSI + raw reference diff against audio-only base DTB
-drivers/    Out-of-tree kernel modules (surface_cam_spmi, surface_ldoe14_xob, tpm_qcom_qsee, surface_ir_sfmt)
+patches/    Clean Linux v7.3 patches (ov13858, ov7251, camss LEDs/RDI, full SC8180X camss, SSAM Type-C registry)
+dts/        Symbolic SC8180X SQ2 DTSIs (cameras, SLPI, Type-C/DP) + reference diffs
+drivers/    Out-of-tree kernel modules (surface_cam_spmi, surface_ldoe14_xob, tpm_qcom_qsee, surface_typec, surface_ir_sfmt)
 libcamera/  Symmetric DebayerEGL IPA YAMLs, WirePlumber rules, Adreno 685 env configs
 faceid/     Howdy PAM/CLI single-thread wrappers, OV7251 config.ini.example, PAM guide
 scripts/    Camera boot loader, media-ctl topology script, GTK4/Libadwaita camera control panel
