@@ -1,0 +1,65 @@
+--- a/sc8180x-surface-pro-x-venus-videocc.dts	2026-11-20 20:34:57.594848667 +0100
++++ b/sc8180x-surface-pro-x-ipa.dts	2026-11-20 21:31:25.749615909 +0100
+@@ -754,6 +754,12 @@
+ 			no-map;
+ 			phandle = <0x50>;
+ 		};
++
++		ipa-fw@9b000000 {
++			reg = <0x00 0x9b000000 0x00 0x60000>;
++			no-map;
++			phandle = <0xf6>;
++		};
+ 	};
+ 
+ 	smp2p-cdsp {
+@@ -824,12 +830,14 @@
+ 		ipa-ap-to-modem {
+ 			qcom,entry-name = "ipa";
+ 			#qcom,smem-state-cells = <0x01>;
++			phandle = <0xf7>;
+ 		};
+ 
+ 		ipa-modem-to-ap {
+ 			qcom,entry-name = "ipa";
+ 			interrupt-controller;
+ 			#interrupt-cells = <0x02>;
++			phandle = <0xf8>;
+ 		};
+ 
+ 		wlan-wpss-to-ap {
+@@ -1779,6 +1787,7 @@
+ 			reg = <0x00 0x1620000 0x00 0x19400>;
+ 			#interconnect-cells = <0x02>;
+ 			qcom,bcm-voters = <0x21>;
++			phandle = <0xf9>;
+ 		};
+ 
+ 		interconnect@16e0000 {
+@@ -2080,6 +2089,26 @@
+ 			phandle = <0x4a>;
+ 		};
+ 
++		ipa@1e40000 {
++			compatible = "qcom,sc8180x-ipa";
++			iommus = <0x2e 0x520 0x00 0x2e 0x522 0x00>;
++			reg = <0x00 0x01e40000 0x00 0x7000 0x00 0x01e47000 0x00 0x4000 0x00 0x01e04000 0x00 0x2c000>;
++			reg-names = "ipa-reg", "ipa-shared", "gsi";
++			interrupts-extended = <0x01 0x00 0x137 0x01 0x01 0x00 0x1b0 0x04 0xf8 0x00 0x01 0xf8 0x01 0x01>;
++			interrupt-names = "ipa", "gsi", "ipa-clock-query", "ipa-setup-ready";
++			clocks = <0x2b 0x0c>;
++			clock-names = "core";
++			interconnects = <0x31 0x09 0x00 0x06 0x01 0x00 0x31 0x09 0x00 0xf9 0x0a 0x00 0x05 0x00 0x00 0x30 0x16 0x00>;
++			interconnect-names = "memory", "imem", "config";
++			qcom,qmp = <0x55>;
++			qcom,smem-states = <0xf7 0x00 0xf7 0x01>;
++			qcom,smem-state-names = "ipa-clock-enabled-valid", "ipa-clock-enabled";
++			qcom,gsi-loader = "self";
++			firmware-name = "qcom/sc8180x/sq2/ipa_fws.elf";
++			memory-region = <0xf6>;
++			status = "okay";
++		};
++
+ 		hwlock@1f40000 {
+ 			compatible = "qcom,tcsr-mutex";
+ 			reg = <0x00 0x1f40000 0x00 0x40000>;

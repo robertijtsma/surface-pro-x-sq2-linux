@@ -229,6 +229,49 @@ sudo systemctl enable surface-venus-setup.service
 
 After rebooting, `/dev/video-venus-dec` exposes `qcom-venus-decoder` (V4L2 M2M) for GStreamer (`v4l2h264dec`, `v4l2h265dec`, `v4l2vp9dec`, `v4l2vp8dec`, `v4l2mpeg2dec`) and FFmpeg (`h264_v4l2m2m`, `hevc_v4l2m2m`, `vp9_v4l2m2m`).
 
+## 10. Snapdragon X24 4G LTE Modem (`IPA v4.1` + `sq2_fsg_read` + `ModemManager`)
+
+See [`docs/LTE_MODEM_IPA.md`](LTE_MODEM_IPA.md) for architecture notes and cold-reboot verification details.
+
+1. **Extract your own unit's `modem_fsg` RF calibration** (one-time, directly from Linux EL1):
+
+```bash
+make -C drivers/sq2_fsg_read
+sudo insmod drivers/sq2_fsg_read/sq2_fsg_read.ko allow=1
+sudo dd if=/sys/kernel/debug/sq2_fsg of=/var/lib/rmtfs/modem_fsg bs=4096 status=none
+sudo chmod 0600 /var/lib/rmtfs/modem_fsg
+sudo rmmod sq2_fsg_read
+```
+
+2. **Stage signed `ipa_fws.elf` firmware** (from Windows `qcipa8180` or fetched via `wudrivers download --extract --only '*ipa*' --only '*fws*'`):
+   - `/lib/firmware/qcom/sc8180x/sq2/ipa_fws.elf`
+
+3. **Apply the IPA v4.1 kernel patch and build `ipa.ko`**:
+
+```bash
+# In your Linux v7.3 kernel tree (CONFIG_QCOM_IPA=m, CONFIG_RMNET=m):
+git apply patches/0011-net-ipa-add-sc8180x-ipa-v4.1-support.patch
+# Build and install ipa.ko into /lib/modules/$(uname -r)/updates/ && sudo depmod -a
+```
+
+4. **Apply the IPA DTB node and enable late-boot LTE & `ModemManager`**:
+
+```bash
+# Include dts/sc8180x-surface-pro-x-sq2-ipa.dtsi (or apply
+# dts/ipa-against-venus.patch) and rebuild your DTB.
+
+sudo cp configs/modprobe.d/ipa-sq2-guard.conf /etc/modprobe.d/
+sudo install -m 755 scripts/lte/surface-lte-load /usr/local/bin/
+sudo cp systemd/surface-lte-setup.service /etc/systemd/system/
+sudo install -Dm644 systemd/ModemManager.service.d/10-after-surface-lte.conf \
+    /etc/systemd/system/ModemManager.service.d/10-after-surface-lte.conf
+sudo systemctl daemon-reload
+sudo systemctl enable surface-lte-setup.service ModemManager.service
+```
+
+After rebooting, `mmcli -L` and NetworkManager (`qrtr0` / `rmnet_ipa0`) expose the Snapdragon X24 4G LTE modem with SIM/eSIM support and QMAP multiplexed bearers (`qmapmux0.0`).
+
+
 
 
 

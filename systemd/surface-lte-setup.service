@@ -1,0 +1,13 @@
+[Unit]
+Description=Surface Pro X SQ2 Qualcomm IPA v4.1 LTE Data-Path Setup
+After=basic.target local-fs.target systemd-udev-trigger.service rmtfs.service surface-camera-setup.service surface-venus-setup.service
+Before=ModemManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/surface-lte-load
+RemainAfterExit=yes
+TimeoutSec=25
+
+[Install]
+WantedBy=multi-user.target

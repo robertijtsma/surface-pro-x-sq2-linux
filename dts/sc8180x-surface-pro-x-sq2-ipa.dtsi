@@ -1,0 +1,60 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Surface Pro X SQ2 — Qualcomm IPA v4.1 (0x1e40000) & firmware staging region
+ *
+ * Enables the SC8180X IPA v4.1 packet offload engine for the integrated
+ * Snapdragon X24 LTE modem (rmnet_ipa0 MAPv4 + QMAP multiplexed bearers).
+ * Staging RAM at 0x9b000000 (384 KiB, no-map) stays outside the Venus PIL gap
+ * (0x8c000000..0x8c600000).
+ */
+
+/ {
+	reserved-memory {
+		ipa_fw_mem: ipa-fw@9b000000 {
+			reg = <0x00 0x9b000000 0x00 0x60000>;
+			no-map;
+		};
+	};
+};
+
+&soc {
+	ipa: ipa@1e40000 {
+		compatible = "qcom,sc8180x-ipa";
+
+		iommus = <&apps_smmu 0x520 0x0>,
+			 <&apps_smmu 0x522 0x0>;
+
+		reg = <0x00 0x01e40000 0x00 0x7000>,
+		      <0x00 0x01e47000 0x00 0x4000>,
+		      <0x00 0x01e04000 0x00 0x2c000>;
+		reg-names = "ipa-reg", "ipa-shared", "gsi";
+
+		interrupts-extended = <&intc GIC_SPI 311 IRQ_TYPE_EDGE_RISING>,
+				      <&intc GIC_SPI 432 IRQ_TYPE_LEVEL_HIGH>,
+				      <&ipa_smp2p_in 0 IRQ_TYPE_EDGE_RISING>,
+				      <&ipa_smp2p_in 1 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "ipa", "gsi",
+				  "ipa-clock-query", "ipa-setup-ready";
+
+		clocks = <&rpmhcc RPMH_IPA_CLK>;
+		clock-names = "core";
+
+		interconnects = <&aggre2_noc MASTER_IPA 0 &mc_virt SLAVE_EBI_CH0 0>,
+				<&aggre2_noc MASTER_IPA 0 &system_noc SLAVE_OCIMEM 0>,
+				<&gem_noc MASTER_APPSS_PROC 0 &config_noc SLAVE_IPA_CFG 0>;
+		interconnect-names = "memory", "imem", "config";
+
+		qcom,qmp = <&aoss_qmp>;
+
+		qcom,smem-states = <&ipa_smp2p_out 0>,
+				   <&ipa_smp2p_out 1>;
+		qcom,smem-state-names = "ipa-clock-enabled-valid",
+					"ipa-clock-enabled";
+
+		qcom,gsi-loader = "self";
+		firmware-name = "qcom/sc8180x/sq2/ipa_fws.elf";
+		memory-region = <&ipa_fw_mem>;
+
+		status = "okay";
+	};
+};

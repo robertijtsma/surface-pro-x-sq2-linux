@@ -25,14 +25,16 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 | **CPU Power Profiles (`SC8180X`)** | Working | Native UPower/hadess D-Bus `PowerProfiles` manager (`daemons/power/surface-power-profile`) |
 | **Hardware GNSS (`QMI LOC`)** | Working | On-demand QRTR QMI LOC → NMEA Unix socket bridge (`/run/surface-gps.sock`) |
 | **Hardware TPM 2.0 (`QSEE fTPM`)** | Working | `tpm_qcom_qsee` QSEECOM transport (`drivers/tpm_qcom_qsee/`); `/dev/tpm0`, `/dev/tpmrm0`, `tpm-rng-0`, SHA-1/256/384 PCR banks |
-| **Suspend (`S2idle` / `S3`)** | Not working | Disabled via `surface-no-deep-suspend.conf`; lid close uses screen-off + session lock + `power-saver` |
 | **Hardware Video Decode (`Venus` / Iris1)** | Working | `videocc-sm8150` (`patches/0009`) + `sq2_venus_overlay` (`drivers/sq2_venus_overlay/`) + Linux 7.3 SQ2 HFI4 `venus-{core,dec}` (`patches/0010`); V4L2 M2M bit-exact 4K H.264 / 4K HEVC / 1080p VP9 (GStreamer & FFmpeg) via EL1 PAS 9 |
+| **4G LTE Cellular Modem (`Snapdragon X24` / `IPA v4.1`)** | Working | Qualcomm `IPA v4.1` (`patches/0011`) + `dts/sc8180x-surface-pro-x-sq2-ipa.dtsi` (`rmnet_ipa0` `MAPv4`) + read-only Linux EL1 SCM `modem_fsg` extractor (`drivers/sq2_fsg_read/`) + `ModemManager` (`qcom-soc`, `qrtr0`, SIM/eSIM, `qmapmux0.0`) |
+| **Suspend (`S2idle` / `S3`)** | Not working | Disabled via `surface-no-deep-suspend.conf`; lid close uses screen-off + session lock + `power-saver` |
 
 ## Upstream `linux-surface/surface-pro-x` Issues Addressed
 
 | Upstream Issue | Topic | Solution in This Repository |
 |---|---|---|
 | [`#56`](https://github.com/linux-surface/surface-pro-x/issues/56) | **All 3 Cameras (`OV5693`, `OV13858`, `OV7251`), LEDs & IR Face ID** | [`patches/0001..0004`](patches/), [`dts/sc8180x-surface-pro-x-sq2-cameras.dtsi`](dts/sc8180x-surface-pro-x-sq2-cameras.dtsi), [`drivers/surface_cam_spmi/`](drivers/surface_cam_spmi/), [`libcamera/`](libcamera/), [`faceid/`](faceid/) |
+| [`#22`](https://github.com/linux-surface/surface-pro-x/issues/22) | **Support for 4G LTE / Cellular Modem (`Snapdragon X24` / `IPA v4.1`)** | [`patches/0011`](patches/0011-net-ipa-add-sc8180x-ipa-v4.1-support.patch), [`dts/sc8180x-surface-pro-x-sq2-ipa.dtsi`](dts/sc8180x-surface-pro-x-sq2-ipa.dtsi), [`drivers/sq2_fsg_read/`](drivers/sq2_fsg_read/), [`systemd/surface-lte-setup.service`](systemd/surface-lte-setup.service) |
 | [`#32`](https://github.com/linux-surface/surface-pro-x/issues/32) | **Touchscreen (`spi-hid`) intermittently fails on boot (`0x0`/`0xff` sync header `-22`)** | [`patches/0006-hid-spi-hid-fix-cold-boot-reset-and-d0-ready-race.patch`](patches/0006-hid-spi-hid-fix-cold-boot-reset-and-d0-ready-race.patch), [`drivers/spi_hid/`](drivers/spi_hid/) |
 | [`#37`](https://github.com/linux-surface/surface-pro-x/issues/37) | **TrEE / Qualcomm QSEE Firmware TPM 2.0 (`MSFT0101`)** | [`drivers/tpm_qcom_qsee/`](drivers/tpm_qcom_qsee/) (`/dev/tpm0`, `/dev/tpmrm0`, `tpm-rng-0`) |
 | [`#38`](https://github.com/linux-surface/surface-pro-x/issues/38) | **Support for Sensors (IMU Auto-Rotation, Compass, Ambient Light, Lid)** | [`dts/sc8180x-surface-pro-x-sq2-slpi.dtsi`](dts/sc8180x-surface-pro-x-sq2-slpi.dtsi), [`drivers/spx_tcs3430/`](drivers/spx_tcs3430/), [`dts/sc8180x-surface-pro-x-sq2-lid.dtsi`](dts/sc8180x-surface-pro-x-sq2-lid.dtsi) |
@@ -53,19 +55,21 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
   - Unloading duplicate in-kernel `qcom_pd_mapper` and starting `remoteproc` modem 0.7 s before `rmtfs` prevents `-EAGAIN` (`failed to announce new service`) so `ath10k` brings up `wlan0` reliably on boot.
 - **Qualcomm Venus (Iris1 / HFI4) 4K hardware video decode**:
   - Ported the SQ2 HFI4 Venus decoder stack to Linux 7.3 (`patches/0009` + `patches/0010`), adding support for `VIDEO.IR.1.2-00079-PROD-2`, fixing Linux 7.3 `vdec_close()` teardown ordering against `venus_close_common()`, and avoiding early-coldplug MMCX watchdog resets via late-boot activation (`surface-venus-setup.service`). Verified bit-for-bit identical SHA-256 against FFmpeg software decoding on 4K H.264, 4K HEVC, and 1080p VP9.
+- **Snapdragon X24 4G LTE modem & Qualcomm IPA v4.1**:
+  - Added SC8180X IPA v4.1 support (`patches/0011`, `dts/sc8180x-surface-pro-x-sq2-ipa.dtsi`, `rmnet_ipa0` `MAPv4`) and a read-only Linux EL1 SCM storage (`0x02001a01`) extractor ([`drivers/sq2_fsg_read/`](drivers/sq2_fsg_read/)) to read each unit's own `modem_fsg` RF calibration from TrustZone-owned SPI NOR without Windows or custom UEFI loaders. Verified cold-boot with `ModemManager` (`qcom-soc`), live 4G LTE carrier registration, and multiplexed `qmapmux0.0` bearer packets.
 
 ## Repository Layout
 
 ```text
-patches/    Clean Linux v7.3 patches (ov13858, ov7251, camss, SSAM Type-C, spi-hid, drm/msm A680, soundwire-qcom, videocc-sm8150, venus-sq2)
-dts/        Symbolic SC8180X SQ2 DTSIs (cameras, SLPI, Type-C/DP, SW_LID + TCS3430, Venus VIDEOCC) + reference diffs
-drivers/    Out-of-tree kernel modules (surface_cam_spmi, surface_ldoe14_xob, tpm_qcom_qsee, surface_typec, spi_hid, spx_tcs3430, surface_ir_sfmt, sq2_venus_overlay)
+patches/    Clean Linux v7.3 patches (ov13858, ov7251, camss, SSAM Type-C, spi-hid, drm/msm A680, soundwire-qcom, videocc-sm8150, venus-sq2, ipa-v4.1)
+dts/        Symbolic SC8180X SQ2 DTSIs (cameras, SLPI, Type-C/DP, SW_LID + TCS3430, Venus VIDEOCC, IPA v4.1) + reference diffs
+drivers/    Out-of-tree kernel modules (surface_cam_spmi, surface_ldoe14_xob, tpm_qcom_qsee, surface_typec, spi_hid, spx_tcs3430, surface_ir_sfmt, sq2_venus_overlay, sq2_fsg_read)
 libcamera/  Symmetric DebayerEGL IPA YAMLs, WirePlumber rules, Adreno 685 env configs
 faceid/     Howdy PAM/CLI single-thread wrappers, OV7251 config.ini.example, PAM guide
-scripts/    Camera & Venus boot loaders, media-ctl topology script, GTK4/Libadwaita camera control panel
+scripts/    Camera, Venus & LTE boot loaders, media-ctl topology script, GTK4/Libadwaita camera control panel
 daemons/    Wi-Fi QRTR drop-in, audio sync, BT MAC, power profiles, ALS, lid/posture, pen, GPS
 configs/    udev rules, modprobe blacklists, iptsd.conf, systemd sleep/logind configs, smart-osk GNOME extension
-systemd/    Systemd service units
+systemd/    Systemd service units & ModemManager ordering drop-in
 docs/       Hardware reference notes & build/installation guide
 ```
 
@@ -73,6 +77,7 @@ docs/       Hardware reference notes & build/installation guide
 
 - [Camera Hardware Notes (CSIPHY, SMMU, SPMI, Titan 175, DebayerEGL)](docs/CAMERA_HARDWARE.md)
 - [Venus 4K Hardware Video Decode Notes (Iris1, HFI4, EL1 PAS 9)](docs/VENUS_VIDEO_DECODE.md)
+- [Snapdragon X24 4G LTE & IPA v4.1 Notes (EL1 SCM FSG, QMAP)](docs/LTE_MODEM_IPA.md)
 - [Build & Installation Guide](docs/BUILD_AND_INSTALL.md)
 - [Howdy IR Face ID Setup](faceid/README.md)
 

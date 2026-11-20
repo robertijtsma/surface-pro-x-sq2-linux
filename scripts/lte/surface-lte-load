@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "=== Surface Pro X SQ2 Snapdragon X24 LTE (IPA v4.1) Setup ==="
+
+if [ ! -d /sys/bus/platform/devices/1e40000.ipa ]; then
+    echo "[i] Active DTB has no ipa@1e40000 node (fallback DTB). Skipping IPA/LTE load."
+    exit 0
+fi
+
+# Wait briefly for modem remoteproc to reach running state after rmtfs
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    MODEM_UP=0
+    for r in /sys/class/remoteproc/remoteproc*; do
+        if [ "$(cat "$r/name" 2>/dev/null)" = "modem" ] && [ "$(cat "$r/state" 2>/dev/null)" = "running" ]; then
+            MODEM_UP=1
+            break
+        fi
+    done
+    [ "$MODEM_UP" = "1" ] && break
+    sleep 0.3
+done
+
+echo "[1/2] Loading Qualcomm IPA v4.1 driver (ipa)..."
+modprobe ipa
+
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -d /sys/class/net/rmnet_ipa0 ] && break
+    sleep 0.1
+done
+
+if [ ! -d /sys/class/net/rmnet_ipa0 ]; then
+    echo "[!] rmnet_ipa0 did not appear after modprobe ipa"
+    exit 1
+fi
+
+echo "[2/2] Loading RMNET QMAP mux driver (rmnet)..."
+modprobe rmnet
+
+echo "[+] Qualcomm IPA v4.1 ready: rmnet_ipa0 (version=$(cat /sys/class/net/rmnet_ipa0/device/version 2>/dev/null || echo unknown))"
