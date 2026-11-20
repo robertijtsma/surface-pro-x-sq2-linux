@@ -181,14 +181,14 @@ def main():
 
     bus.add_signal_receiver(
         on_properties_changed,
-        sender="org.bluez",
+        bus_name="org.bluez",
         dbus_interface="org.freedesktop.DBus.Properties",
         signal_name="PropertiesChanged",
         path_keyword="path",
     )
     bus.add_signal_receiver(
         on_interfaces_added,
-        sender="org.bluez",
+        bus_name="org.bluez",
         dbus_interface="org.freedesktop.DBus.ObjectManager",
         signal_name="InterfacesAdded",
     )
