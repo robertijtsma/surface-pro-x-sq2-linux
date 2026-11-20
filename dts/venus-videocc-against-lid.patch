@@ -1,0 +1,10 @@
+--- a/sc8180x-surface-pro-x-lid.dts	2026-11-20 05:57:49.793731524 +0100
++++ b/sc8180x-surface-pro-x-venus-videocc.dts	2026-11-20 20:34:57.594848667 +0100
+@@ -2899,6 +2899,7 @@
+ 			#clock-cells = <0x01>;
+ 			#reset-cells = <0x01>;
+ 			#power-domain-cells = <0x01>;
++					phandle = <0xf5>;
+ 		};
+ 
+ 		clock-controller@ad00000 {

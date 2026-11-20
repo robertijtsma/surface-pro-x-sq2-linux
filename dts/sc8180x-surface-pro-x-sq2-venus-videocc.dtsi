@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Surface Pro X SQ2 — Static VIDEOCC phandle anchor for late-boot Venus bring-up
+ *
+ * The SC8180X video clock controller at 0xab00000 sits in the MMCX power domain
+ * alongside camcc@ad00000. To avoid early udev coldplug MMCX watchdog resets
+ * while display/SPMI/RPMh settle, videocc_sm8150 and venus_* are blacklisted
+ * during early coldplug and loaded late via surface-venus-setup.service.
+ *
+ * Exporting a static phandle on clock-controller@ab00000 allows the runtime
+ * sq2_venus_overlay module to attach /soc@0/venus-sq2@aa00000 without mutating
+ * any existing Device Tree node at runtime.
+ */
+
+&videocc {
+	compatible = "qcom,sc8180x-videocc", "qcom,sm8150-videocc";
+	phandle = <0xf5>;
+	status = "okay";
+};

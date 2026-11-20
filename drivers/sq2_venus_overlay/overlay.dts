@@ -1,0 +1,32 @@
+/dts-v1/;
+/plugin/;
+/ {
+    fragment@0 {
+        target-path = "/soc@0";
+        __overlay__ {
+            #address-cells = <2>;
+            #size-cells = <2>;
+            venus-sq2@aa00000 {
+                compatible = "microsoft,sq2-venus-lab";
+                reg = <0 0xaa00000 0 0x100000>;
+                iommus = <0x2e 0x2300 0>, <0x2e 0x2320 0>, <0x2e 0x2340 0>;
+                microsoft,windows-hfi-reference;
+                power-domains = <0xf5 0>, <0xf5 1>, <0xf5 2>;
+                clocks = <0x2d 227>, <0x2d 225>, <0x2d 226>,
+                         <0xf5 4>, <0xf5 2>, <0xf5 3>, <0xf5 0>;
+                clock-names = "axic", "axi0", "axi1", "core", "vcodec", "cvp", "ahb";
+                resets = <0x2d 41>, <0xf5 0>, <0x2d 42>, <0x2d 43>;
+                reset-names = "axi", "core", "axi0", "axi1";
+                interconnects = <0x5 0 3 0x30 54 3>,
+                                <0x6c 7 3 0x6 1 3>,
+                                <0x6c 9 3 0x6 1 3>;
+                interconnect-names = "cpu-cfg", "video-mem", "firmware-mem";
+                interrupts = <0 174 4>;
+                status = "okay";
+                video-decoder {
+                    compatible = "venus-decoder";
+                };
+            };
+        };
+    };
+};

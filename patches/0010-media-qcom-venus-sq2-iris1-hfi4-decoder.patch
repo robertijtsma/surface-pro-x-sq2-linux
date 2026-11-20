@@ -1,0 +1,4803 @@
+From: robertijtsma <37256770+robertijtsma@users.noreply.github.com>
+Subject: [PATCH] media: qcom: venus: port SQ2 Iris1 HFI4 decoder backend to Linux 7.3
+
+Ports the SC8180X / Surface Pro X SQ2 Iris1 HFI4 hardware video decoder
+backend (originating from lhf1a/googlebookos_surface_pro_x) to Linux 7.3:
+
+- Adds explicit opt-in platform match ("microsoft,sq2-venus-lab", guarded
+  by module parameter sq2_platform_allow=1) with dedicated power/clock/
+  reset/ICC ownership, PIL gap firmware loading at 0x8c000000 via EL1
+  TrustZone SCM PAS 9, and HFI4 Windows-reference queue/SMMU layout.
+- Accepts both Surface Pro X SQ2 venus.mbn releases
+  (VIDEO.IR.1.2-00042-PROD-1 and VIDEO.IR.1.2-00079-PROD-2) and allows
+  merged UEFI reserved /proc/iomem parent ranges (>= PIL end).
+- Adapts upstream Linux 7.3 Venus changes (void venus_remove(),
+  hfi_bufreq_get_count_min(), kzalloc_obj(), MODULE_IMPORT_NS("DMA_BUF"),
+  upstream P010 format support, and venus_close_common() teardown ordering
+  in vdec_close() so v4l2_m2m_ctx_release() runs vdec_session_release()
+  before the SQ2 SESSION_END close guard).
+
+Verified on live SQ2 hardware (7.3.1-1-surface) with bit-exact SHA-256
+matches against FFmpeg software decoding across 4K H.264 (3840x2160),
+4K HEVC (3840x2160), and 1080p VP9 (1920x1080) over repeated sessions.
+---
+diff -ruN a/drivers/media/platform/qcom/venus/core.c b/drivers/media/platform/qcom/venus/core.c
+--- a/drivers/media/platform/qcom/venus/core.c	2026-11-20 21:12:15.934193811 +0100
++++ b/drivers/media/platform/qcom/venus/core.c	2026-11-20 21:12:15.959945074 +0100
+@@ -72,9 +72,14 @@
+ 	set_bit(0, &core->sys_error);
+ 	set_bit(0, &core->dump_core);
+ 	list_for_each_entry(inst, &core->instances, list)
+-		inst->ops->event_notify(inst, EVT_SESSION_ERROR, NULL);
++		if (!IS_SQ2_HFI(core) || !READ_ONCE(inst->sq2_closing))
++			inst->ops->event_notify(inst, EVT_SESSION_ERROR, NULL);
+ 	mutex_unlock(&core->lock);
+ 
++	if (IS_SQ2_HFI(core)) {
++		schedule_delayed_work(&core->work, 0);
++		return;
++	}
+ 	disable_irq_nosync(core->irq);
+ 	schedule_delayed_work(&core->work, msecs_to_jiffies(10));
+ }
+@@ -377,12 +382,21 @@
+ static void venus_remove_dynamic_nodes(struct venus_core *core) {}
+ #endif
+ 
++static void venus_sq2_pm_publish(struct venus_core *core);
++#include "venus-sq2-core.h"
++#include "venus-sq2-system-pm.h"
++
+ static int venus_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct venus_core *core;
+ 	int ret;
+ 
++	const struct venus_resources *res = of_device_get_match_data(dev);
++
++	if (res && res->sq2_windows_hfi)
++		return venus_sq2_probe(pdev, res);
++
+ 	core = devm_kzalloc(dev, sizeof(*core), GFP_KERNEL);
+ 	if (!core)
+ 		return -ENOMEM;
+@@ -409,6 +423,10 @@
+ 	if (!core->res)
+ 		return -ENODEV;
+ 
++	/* PAS callsites are compile-tested; devres quarantine is pending. */
++	if (IS_SQ2_HFI(core))
++		return -EOPNOTSUPP;
++
+ 	mutex_init(&core->pm_lock);
+ 
+ 	core->pm_ops = venus_pm_get(core->res->hfi_version);
+@@ -539,6 +557,11 @@
+ 	int ret;
+ 
+ 	cancel_delayed_work_sync(&core->work);
++	if (IS_SQ2_HFI(core)) {
++		venus_sq2_remove(pdev);
++		return;
++	}
++
+ 	ret = pm_runtime_get_sync(dev);
+ 	WARN_ON(ret < 0);
+ 
+@@ -571,6 +594,11 @@
+ {
+ 	struct venus_core *core = platform_get_drvdata(pdev);
+ 
++	if (IS_SQ2_HFI(core)) {
++		cancel_delayed_work_sync(&core->work);
++		venus_sq2_stop_core(core);
++		return;
++	}
+ 	pm_runtime_get_sync(core->dev);
+ 	venus_shutdown(core);
+ 	venus_firmware_deinit(core);
+@@ -583,6 +611,8 @@
+ 	const struct venus_pm_ops *pm_ops = core->pm_ops;
+ 	int ret;
+ 
++	if (IS_SQ2_HFI(core))
++		return -EBUSY;
+ 	ret = hfi_core_suspend(core);
+ 	if (ret)
+ 		return ret;
+@@ -638,6 +668,8 @@
+ 	const struct venus_pm_ops *pm_ops = core->pm_ops;
+ 	int ret;
+ 
++	if (IS_SQ2_HFI(core))
++		return test_bit(0, &core->sys_error) ? -EIO : 0;
+ 	ret = icc_set_bw(core->video_path, kbps_to_icc(20000), 0);
+ 	if (ret)
+ 		return ret;
+@@ -656,8 +688,8 @@
+ }
+ 
+ static const struct dev_pm_ops venus_pm_ops = {
+-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
+-				pm_runtime_force_resume)
++	SET_SYSTEM_SLEEP_PM_OPS(venus_sq2_system_suspend,
++				venus_sq2_system_resume)
+ 	SET_RUNTIME_PM_OPS(venus_runtime_suspend, venus_runtime_resume, NULL)
+ };
+ 
+@@ -1170,7 +1202,9 @@
+ 	.min_fw = &min_fw,
+ };
+ 
++#include "venus-sq2-resources.h"
+ static const struct of_device_id venus_dt_match[] = {
++	{ .compatible = "microsoft,sq2-venus-lab", .data = &sq2_lab_res },
+ 	{ .compatible = "qcom,msm8916-venus", .data = &msm8916_res, },
+ 	{ .compatible = "qcom,msm8939-venus", .data = &msm8939_res, },
+ 	{ .compatible = "qcom,msm8996-venus", .data = &msm8996_res, },
+diff -ruN a/drivers/media/platform/qcom/venus/core.h b/drivers/media/platform/qcom/venus/core.h
+--- a/drivers/media/platform/qcom/venus/core.h	2026-11-20 21:12:15.934385071 +0100
++++ b/drivers/media/platform/qcom/venus/core.h	2026-11-20 21:12:16.217609901 +0100
+@@ -92,6 +92,9 @@
+ 	const u32 enc_codec_blacklist;
+ 	const char * const resets[VIDC_RESETS_NUM_MAX];
+ 	unsigned int resets_num;
++	/* VPU hardware is independent of HFI packet version. */
++	bool iris1;
++	bool sq2_windows_hfi;
+ 	enum hfi_version hfi_version;
+ 	enum vpu_version vpu_version;
+ 	u8 num_vpp_pipes;
+@@ -190,7 +193,20 @@
+  * @ocs:	OF changeset pointer
+  * @hwmode_dev:	a flag indicating that HW_CTRL_TRIGGER is used in clock driver
+  */
++struct sq2_venus_fw;
++struct sq2_venus_platform;
++#include "sq2-venus-system-pm.h"
+ struct venus_core {
++ struct sq2_system_pm sq2_system_pm;
++ bool sq2_no_tz_active;
++	struct sq2_venus_platform *sq2_platform;
++	struct sq2_venus_fw *sq2_fw_owner;
++	bool sq2_public, sq2_children, sq2_pm_enabled;
++	struct mutex sq2_retire_lock;
++	unsigned long sq2_vb2_bytes;
++	struct list_head sq2_retired;
++	bool sq2_dma_stopped;
++	bool sq2_boot_attempted, sq2_secure_active;
+ 	void __iomem *base;
+ 	void __iomem *vbif_base;
+ 	void __iomem *cpu_base;
+@@ -459,6 +475,13 @@
+  * @dpb_ids:	DPB buffer ID's
+  */
+ struct venus_inst {
++	atomic_t sq2_callbacks;
++	bool sq2_closing;
++	struct completion sq2_end_done;
++	u32 sq2_end_error;
++	struct sq2_venus_scope *sq2_scope;
++	bool sq2_end_sent, sq2_end_confirmed;
++	u32 sq2_capture_stride, sq2_capture_scan, sq2_capture_size;
+ 	struct list_head list;
+ 	struct mutex lock;
+ 	struct venus_core *core;
+@@ -514,6 +537,8 @@
+ 	struct v4l2_m2m_dev *m2m_dev;
+ 	struct v4l2_m2m_ctx *m2m_ctx;
+ 	struct mutex ctx_q_lock;
++	u32 sq2_omx_flush_flags;
++	bool sq2_omx_flush_output_pending;
+ 	unsigned int state;
+ 	struct completion done;
+ 	unsigned int error;
+@@ -532,6 +557,7 @@
+ 
+ #define IS_V1(core)	((core)->res->hfi_version == HFI_VERSION_1XX)
+ #define IS_V3(core)	((core)->res->hfi_version == HFI_VERSION_3XX)
++#define IS_SQ2_HFI(core) ((core)->res->sq2_windows_hfi)
+ #define IS_V4(core)	((core)->res->hfi_version == HFI_VERSION_4XX)
+ #if (!IS_ENABLED(CONFIG_VIDEO_QCOM_IRIS))
+ #define IS_V6(core)	((core)->res->hfi_version == HFI_VERSION_6XX)
+@@ -541,7 +567,7 @@
+ 
+ #define IS_AR50(core)		((core)->res->vpu_version == VPU_VERSION_AR50)
+ #define IS_AR50_LITE(core)	((core)->res->vpu_version == VPU_VERSION_AR50_LITE)
+-#define IS_IRIS1(core)		((core)->res->vpu_version == VPU_VERSION_IRIS1)
++#define IS_IRIS1(core)		((core)->res->iris1 || (core)->res->vpu_version == VPU_VERSION_IRIS1)
+ #if (!IS_ENABLED(CONFIG_VIDEO_QCOM_IRIS))
+ #define IS_IRIS2(core)		((core)->res->vpu_version == VPU_VERSION_IRIS2)
+ #define IS_IRIS2_1(core)	((core)->res->vpu_version == VPU_VERSION_IRIS2_1)
+diff -ruN a/drivers/media/platform/qcom/venus/firmware.c b/drivers/media/platform/qcom/venus/firmware.c
+--- a/drivers/media/platform/qcom/venus/firmware.c	2026-11-20 21:12:15.934680972 +0100
++++ b/drivers/media/platform/qcom/venus/firmware.c	2026-11-20 21:12:15.976844688 +0100
+@@ -20,6 +20,10 @@
+ #include "core.h"
+ #include "firmware.h"
+ #include "hfi_venus_io.h"
++#include "venus-iris1.h"
++#include "sq2-venus-fw.h"
++#include "sq2-venus-platform.h"
++#include "venus-sq2-firmware.h"
+ 
+ #define VENUS_PAS_ID			9
+ #define VENUS_FW_MEM_SIZE		(6 * SZ_1M)
+@@ -58,6 +62,10 @@
+ {
+ 	int ret;
+ 
++	/* Independent owner already holds hardware powered; no stock SCM state call. */
++	if (IS_SQ2_HFI(core))
++		return resume && core->sq2_secure_active ? 0 : -EBUSY;
++
+ 	if (core->use_tz) {
+ 		ret = qcom_pas_set_remote_state(resume, 0);
+ 		if (resume && ret == -EINVAL)
+@@ -218,6 +226,9 @@
+ 	size_t mem_size;
+ 	int ret;
+ 
++	if (IS_SQ2_HFI(core))
++		return venus_sq2_boot(core);
++
+ 	if (!IS_ENABLED(CONFIG_QCOM_MDT_LOADER) ||
+ 	    (core->use_tz && !qcom_pas_is_available()))
+ 		return -EPROBE_DEFER;
+@@ -227,6 +238,12 @@
+ 	if (ret)
+ 		fwpath = core->res->fwname;
+ 
++	if (IS_IRIS1(core)) {
++		if (!IS_V4(core))
++			return -EINVAL;
++		venus_iris1_clock_config(core);
++	}
++
+ 	ret = venus_load_fw(core, fwpath, &mem_phys, &mem_size);
+ 	if (ret) {
+ 		dev_err(dev, "fail to load video firmware\n");
+@@ -274,6 +291,9 @@
+ {
+ 	int ret;
+ 
++	if (IS_SQ2_HFI(core))
++		return venus_sq2_shutdown(core);
++
+ 	if (core->use_tz)
+ 		ret = qcom_pas_shutdown(VENUS_PAS_ID);
+ 	else
+diff -ruN a/drivers/media/platform/qcom/venus/helpers.c b/drivers/media/platform/qcom/venus/helpers.c
+--- a/drivers/media/platform/qcom/venus/helpers.c	2026-11-20 21:12:15.934932287 +0100
++++ b/drivers/media/platform/qcom/venus/helpers.c	2026-11-20 21:12:15.985394030 +0100
+@@ -13,7 +13,10 @@
+ #include <asm/div64.h>
+ 
+ #include "core.h"
++#include "sq2-venus-buffer.h"
++#include "sq2-venus-retire.h"
+ #include "helpers.h"
++#include "venus-sq2-omx-flags.h"
+ #include "hfi_helper.h"
+ #include "pm_helpers.h"
+ #include "hfi_platform.h"
+@@ -28,6 +31,10 @@
+ };
+ 
+ struct intbuf {
++	struct sq2_venus_retired sq2_retired;
++	struct venus_core *sq2_core;
++	unsigned long sq2_charged;
++	struct device *sq2_dev;
+ 	struct list_head list;
+ 	u32 type;
+ 	size_t size;
+@@ -38,6 +45,8 @@
+ 	u32 dpb_out_tag;
+ };
+ 
++#include "venus-sq2-intbuf.h"
++
+ bool venus_helper_check_codec(struct venus_inst *inst, u32 v4l2_pixfmt)
+ {
+ 	struct venus_core *core = inst->core;
+@@ -92,11 +101,15 @@
+ 
+ static void free_dpb_buf(struct venus_inst *inst, struct intbuf *buf)
+ {
++	if (IS_SQ2_HFI(inst->core)) {
++		/* Do not recycle a tag still visible to live firmware. */
++		sq2_intbuf_retire(inst, buf);
++		return;
++	}
+ 	ida_free(&inst->dpb_ids, buf->dpb_out_tag);
+ 
+ 	list_del_init(&buf->list);
+-	dma_free_attrs(inst->core->dev, buf->size, buf->va, buf->da,
+-		       buf->attrs);
++	sq2_intbuf_dma_free(inst, buf);
+ 	kfree(buf);
+ }
+ 
+@@ -130,6 +143,10 @@
+ 
+ 		fdata.clnt_data = buf->dpb_out_tag;
+ 
++	if (IS_SQ2_HFI(inst->core)) {
++		int sq2_ret = sq2_venus_scope_bind(inst, &buf->sq2_retired);
++		if (sq2_ret) return sq2_ret;
++	}
+ 		ret = hfi_session_process_buf(inst, &fdata);
+ 		if (ret)
+ 			goto fail;
+@@ -147,7 +164,9 @@
+ 	struct intbuf *buf, *n;
+ 
+ 	list_for_each_entry_safe(buf, n, &inst->dpbbufs, list) {
+-		if (buf->owned_by == FIRMWARE)
++		if (buf->owned_by == FIRMWARE &&
++		    (!IS_SQ2_HFI(inst->core) ||
++		     !sq2_venus_scope_ended(inst, &buf->sq2_retired)))
+ 			continue;
+ 		free_dpb_buf(inst, buf);
+ 	}
+@@ -202,16 +221,22 @@
+ 		buf->size = dpb_size;
+ 		buf->attrs = DMA_ATTR_WRITE_COMBINE |
+ 			     DMA_ATTR_NO_KERNEL_MAPPING;
+-		buf->va = dma_alloc_attrs(dev, buf->size, &buf->da, GFP_KERNEL,
+-					  buf->attrs);
++		buf->va = sq2_intbuf_alloc(inst, buf);
+ 		if (!buf->va) {
+ 			ret = -ENOMEM;
+ 			goto fail;
+ 		}
++		if (IS_SQ2_HFI(inst->core) && !sq2_venus_buffer_valid(buf->da, buf->size)) {
++			sq2_intbuf_dma_free(inst, buf);
++			ret = -ERANGE;
++			goto fail;
++		}
+ 		buf->owned_by = DRIVER;
+ 
+ 		id = ida_alloc_min(&inst->dpb_ids, VB2_MAX_FRAME, GFP_KERNEL);
+ 		if (id < 0) {
++			if (IS_SQ2_HFI(inst->core))
++				sq2_intbuf_dma_free(inst, buf);
+ 			ret = id;
+ 			goto fail;
+ 		}
+@@ -258,19 +283,26 @@
+ 		buf->size = bufreq.size;
+ 		buf->attrs = DMA_ATTR_WRITE_COMBINE |
+ 			     DMA_ATTR_NO_KERNEL_MAPPING;
+-		buf->va = dma_alloc_attrs(dev, buf->size, &buf->da, GFP_KERNEL,
+-					  buf->attrs);
++		buf->va = sq2_intbuf_alloc(inst, buf);
+ 		if (!buf->va) {
+ 			ret = -ENOMEM;
+ 			goto fail;
+ 		}
+ 
++		if (IS_SQ2_HFI(core) && !sq2_venus_buffer_valid(buf->da, buf->size)) {
++			ret = -ERANGE;
++			goto dma_free;
++		}
+ 		memset(&bd, 0, sizeof(bd));
+ 		bd.buffer_size = buf->size;
+ 		bd.buffer_type = buf->type;
+ 		bd.num_buffers = 1;
+ 		bd.device_addr = buf->da;
+ 
++		if (IS_SQ2_HFI(core)) {
++			ret = sq2_venus_scope_bind(inst, &buf->sq2_retired);
++			if (ret) goto dma_free;
++		}
+ 		ret = hfi_session_set_buffers(inst, &bd);
+ 		if (ret) {
+ 			dev_err(dev, "set session buffers failed\n");
+@@ -283,7 +315,11 @@
+ 	return 0;
+ 
+ dma_free:
+-	dma_free_attrs(dev, buf->size, buf->va, buf->da, buf->attrs);
++	if (IS_SQ2_HFI(core) && buf->sq2_retired.scope) {
++		sq2_intbuf_retire(inst, buf);
++		return ret;
++	}
++	sq2_intbuf_dma_free(inst, buf);
+ fail:
+ 	kfree(buf);
+ 	return ret;
+@@ -303,10 +339,15 @@
+ 		bd.response_required = true;
+ 
+ 		ret = hfi_session_unset_buffers(inst, &bd);
++		if (IS_SQ2_HFI(inst->core) && ret)
++			return ret; /* no confirmed release: retain DMA and list entry */
++		if (IS_SQ2_HFI(inst->core)) {
++			sq2_intbuf_retire(inst, buf);
++			continue;
++		}
+ 
+ 		list_del_init(&buf->list);
+-		dma_free_attrs(inst->core->dev, buf->size, buf->va, buf->da,
+-			       buf->attrs);
++		sq2_intbuf_dma_free(inst, buf);
+ 		kfree(buf);
+ 	}
+ 
+@@ -394,9 +435,14 @@
+ 		bd.response_required = true;
+ 
+ 		ret = hfi_session_unset_buffers(inst, &bd);
++		if (IS_SQ2_HFI(inst->core) && ret)
++			return ret; /* no confirmed release: retain DMA and list entry */
++		if (IS_SQ2_HFI(inst->core)) {
++			sq2_intbuf_retire(inst, buf);
++			continue;
++		}
+ 
+-		dma_free_attrs(inst->core->dev, buf->size, buf->va, buf->da,
+-			       buf->attrs);
++		sq2_intbuf_dma_free(inst, buf);
+ 
+ 		list_del_init(&buf->list);
+ 		kfree(buf);
+@@ -519,8 +565,12 @@
+ 		if (vbuf->flags & V4L2_BUF_FLAG_LAST || !fdata.filled_len)
+ 			fdata.flags |= HFI_BUFFERFLAG_EOS;
+ 
+-		if (inst->session_type == VIDC_SESSION_TYPE_DEC)
+-			put_ts_metadata(inst, vbuf);
++		if (inst->session_type == VIDC_SESSION_TYPE_DEC) {
++			if (IS_SQ2_HFI(inst->core) && sq2_omx_input_flags(vbuf->flags))
++				fdata.flags |= sq2_omx_input_flags(vbuf->flags);
++			else
++				put_ts_metadata(inst, vbuf);
++		}
+ 
+ 		venus_pm_load_scale(inst);
+ 	} else if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+@@ -532,6 +582,10 @@
+ 		fdata.offset = 0;
+ 	}
+ 
++	if (IS_SQ2_HFI(inst->core)) {
++		int sq2_ret = sq2_venus_scope_bind(inst, vb->planes[0].mem_priv);
++		if (sq2_ret) return sq2_ret;
++	}
+ 	return hfi_session_process_buf(inst, &fdata);
+ }
+ 
+@@ -586,6 +640,11 @@
+ 
+ 	list_for_each_entry(buf, &inst->registeredbufs, reg_list) {
+ 		fill_buffer_desc(buf, &bd, false);
++		if (IS_SQ2_HFI(core) && inst->session_type == VIDC_SESSION_TYPE_DEC) {
++			ret = sq2_venus_scope_bind(inst, buf->vb.vb2_buf.planes[0].mem_priv);
++			if (ret)
++				break;
++		}
+ 		ret = hfi_session_set_buffers(inst, &bd);
+ 		if (ret) {
+ 			dev_err(dev, "%s: set buffer failed\n", __func__);
+@@ -766,7 +825,10 @@
+ 	{ HFI_H264_LEVEL_42, V4L2_MPEG_VIDEO_H264_LEVEL_4_2 },
+ 	{ HFI_H264_LEVEL_5, V4L2_MPEG_VIDEO_H264_LEVEL_5_0 },
+ 	{ HFI_H264_LEVEL_51, V4L2_MPEG_VIDEO_H264_LEVEL_5_1 },
+-	{ HFI_H264_LEVEL_52, V4L2_MPEG_VIDEO_H264_LEVEL_5_1 },
++	{ HFI_H264_LEVEL_52, V4L2_MPEG_VIDEO_H264_LEVEL_5_2 },
++	{ HFI_H264_LEVEL_6, V4L2_MPEG_VIDEO_H264_LEVEL_6_0 },
++	{ HFI_H264_LEVEL_61, V4L2_MPEG_VIDEO_H264_LEVEL_6_1 },
++	{ HFI_H264_LEVEL_62, V4L2_MPEG_VIDEO_H264_LEVEL_6_2 },
+ };
+ 
+ static const struct id_mapping hevc_profiles[] = {
+@@ -915,6 +977,26 @@
+ 	}
+ }
+ 
++int venus_helper_sq2_avc_controls(struct venus_core *core, u64 *mask, u32 *level)
++{
++ const struct hfi_plat_caps *c = venus_caps_by_codec(core, HFI_VIDEO_CODEC_H264, VIDC_SESSION_TYPE_DEC);
++ unsigned int i, j;
++ u32 p, l;
++ *mask = 0; *level = 0;
++ if (!c || !c->num_pl) return -ENODATA;
++ for (i=0; i<c->num_pl; i++) {
++  p = U32_MAX; l = U32_MAX;
++  for (j=0; j<ARRAY_SIZE(h264_profiles); j++)
++   if (h264_profiles[j].hfi_id == c->pl[i].profile) p = h264_profiles[j].v4l2_id;
++  for (j=0; j<ARRAY_SIZE(h264_levels); j++)
++   if (h264_levels[j].hfi_id == c->pl[i].level) l = h264_levels[j].v4l2_id;
++  if (p >= 64 || l == U32_MAX) return -EINVAL;
++  *mask |= BIT_ULL(p); *level = max(*level, l);
++ }
++ return 0;
++}
++EXPORT_SYMBOL_GPL(venus_helper_sq2_avc_controls);
++
+ int venus_helper_get_profile_level(struct venus_inst *inst, u32 *profile, u32 *level)
+ {
+ 	const u32 ptype = HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT;
+@@ -1447,6 +1529,10 @@
+ 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
+ 	struct venus_buffer *buf = to_venus_buffer(vbuf);
+ 
++	if (IS_SQ2_HFI(inst->core) && (vb->num_planes != 1 ||
++	    !sq2_venus_buffer_valid(vb2_dma_contig_plane_dma_addr(vb, 0),
++	                            vb2_plane_size(vb, 0))))
++		return -ERANGE;
+ 	buf->size = vb2_plane_size(vb, 0);
+ 	buf->dma_addr = vb2_dma_contig_plane_dma_addr(vb, 0);
+ 
+@@ -1463,6 +1549,15 @@
+ 	unsigned int out_buf_size = venus_helper_get_opb_size(inst);
+ 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
+ 
++	if (IS_SQ2_HFI(inst->core) && (vb->num_planes != 1 ||
++	    !sq2_venus_buffer_valid(vb2_dma_contig_plane_dma_addr(vb, 0),
++	                            vb2_plane_size(vb, 0))))
++		return -ERANGE;
++	if (IS_SQ2_HFI(inst->core) && V4L2_TYPE_IS_OUTPUT(vb->type) &&
++	    !sq2_venus_payload_valid(vb2_plane_size(vb, 0),
++	                             vb2_get_plane_payload(vb, 0),
++	                             vb->planes[0].data_offset))
++		return -EINVAL;
+ 	if (V4L2_TYPE_IS_OUTPUT(vb->vb2_queue->type)) {
+ 		if (vbuf->field == V4L2_FIELD_ANY)
+ 			vbuf->field = V4L2_FIELD_NONE;
+@@ -1508,6 +1603,13 @@
+ 	    inst->codec_state == VENUS_DEC_STATE_DRC)
+ 		return;
+ 
++	/* OMX may STREAMON capture before the decoder has actually started. */
++	if (IS_SQ2_HFI(inst->core) &&
++	    inst->session_type == VIDC_SESSION_TYPE_DEC &&
++	    V4L2_TYPE_IS_CAPTURE(vb->vb2_queue->type) &&
++	    !inst->streamon_cap)
++		return;
++
+ 	cache_payload(inst, vb);
+ 
+ 	if (inst->session_type == VIDC_SESSION_TYPE_ENC &&
+@@ -1788,6 +1890,16 @@
+ 		}
+ 	}
+ 
++	/* SQ2 advertises TP10 UBWC DPB + linear P010 output2. */
++	if (IS_SQ2_HFI(core) && fmt == HFI_COLOR_FORMAT_P010) {
++		if (!find_fmt_from_caps(caps, HFI_BUFFER_OUTPUT, HFI_COLOR_FORMAT_YUV420_TP10_UBWC) ||
++		    !find_fmt_from_caps(caps, HFI_BUFFER_OUTPUT2, HFI_COLOR_FORMAT_P010))
++			return -EINVAL;
++		*out_fmt = HFI_COLOR_FORMAT_YUV420_TP10_UBWC;
++		*out2_fmt = HFI_COLOR_FORMAT_P010;
++		return 0;
++	}
++
+ 	if (ubwc) {
+ 		ubwc_fmt = fmt | HFI_COLOR_FORMAT_UBWC_BASE;
+ 		found_ubwc = find_fmt_from_caps(caps, HFI_BUFFER_OUTPUT,
+diff -ruN a/drivers/media/platform/qcom/venus/helpers.h b/drivers/media/platform/qcom/venus/helpers.h
+--- a/drivers/media/platform/qcom/venus/helpers.h	2026-11-20 21:12:15.935174539 +0100
++++ b/drivers/media/platform/qcom/venus/helpers.h	2026-11-20 21:12:16.255796695 +0100
+@@ -71,4 +71,7 @@
+ int venus_helper_set_profile_level(struct venus_inst *inst, u32 profile, u32 level);
+ int venus_helper_set_stride(struct venus_inst *inst, unsigned int aligned_width,
+ 			    unsigned int aligned_height);
++void venus_helper_sq2_retire_buffers(struct venus_inst *inst);
+ #endif
++
++int venus_helper_sq2_avc_controls(struct venus_core *core, u64 *mask, u32 *level);
+diff -ruN a/drivers/media/platform/qcom/venus/hfi.c b/drivers/media/platform/qcom/venus/hfi.c
+--- a/drivers/media/platform/qcom/venus/hfi.c	2026-11-20 21:12:15.935275012 +0100
++++ b/drivers/media/platform/qcom/venus/hfi.c	2026-11-20 21:12:15.995154373 +0100
+@@ -11,12 +11,16 @@
+ #include <linux/videodev2.h>
+ 
+ #include "core.h"
++#include "sq2-venus-retire.h"
++#include "venus-sq2-callback.h"
+ #include "hfi.h"
+ #include "hfi_cmds.h"
+ #include "hfi_venus.h"
+ 
+ #define TIMEOUT		msecs_to_jiffies(1000)
+ 
++#include "venus-sq2-session-end.h"
++
+ static u32 to_codec_type(u32 pixfmt)
+ {
+ 	switch (pixfmt) {
+@@ -162,6 +166,10 @@
+ 		return -EINVAL;
+ 
+ 	inst->state = INST_UNINIT;
++	atomic_set(&inst->sq2_callbacks, 0);
++	inst->sq2_closing = false;
++	init_completion(&inst->sq2_end_done);
++	inst->sq2_end_sent = inst->sq2_end_confirmed = false;
+ 	init_completion(&inst->done);
+ 	inst->ops = ops;
+ 
+@@ -171,6 +179,13 @@
+ 		ret = -EIO;
+ 		goto unlock;
+ 	}
++#ifdef SQ2_VENUS_SYSTEM_PM
++	/* Pair with the PM second idle check: no new session after STOPPING. */
++	if (IS_SQ2_HFI(core) && READ_ONCE(core->sq2_system_pm.phase) != SQ2_PM_RUNNING) {
++		ret = -EBUSY;
++		goto unlock;
++	}
++#endif
+ 
+ 	max = atomic_add_unless(&core->insts_count, 1,
+ 				core->max_sessions_supported);
+@@ -209,6 +224,12 @@
+ 	if (inst->state != INST_UNINIT)
+ 		return -EALREADY;
+ 
++	if (IS_SQ2_HFI(core)) {
++		if (inst->sq2_end_sent && !inst->sq2_end_confirmed) return -EIO;
++		ret = sq2_venus_scope_begin(inst);
++		if (ret) return ret;
++		inst->sq2_end_sent = inst->sq2_end_confirmed = false;
++	}
+ 	inst->hfi_codec = to_codec_type(pixfmt);
+ 	reinit_completion(&inst->done);
+ 
+@@ -235,6 +256,8 @@
+ 	if (atomic_dec_and_test(&core->insts_count))
+ 		wake_up_var(&core->insts_count);
+ 	mutex_unlock(&core->lock);
++	sq2_callback_drain(inst);
++	if (IS_SQ2_HFI(core)) sq2_venus_scope_drop(inst);
+ }
+ EXPORT_SYMBOL_GPL(hfi_session_destroy);
+ 
+@@ -243,6 +266,8 @@
+ 	const struct hfi_ops *ops = inst->core->ops;
+ 	int ret;
+ 
++	if (IS_SQ2_HFI(inst->core)) return sq2_session_end(inst);
++
+ 	if (inst->state == INST_UNINIT)
+ 		return 0;
+ 
+diff -ruN a/drivers/media/platform/qcom/venus/hfi_cmds.c b/drivers/media/platform/qcom/venus/hfi_cmds.c
+--- a/drivers/media/platform/qcom/venus/hfi_cmds.c	2026-11-20 21:12:15.935446740 +0100
++++ b/drivers/media/platform/qcom/venus/hfi_cmds.c	2026-11-20 21:12:16.005375884 +0100
+@@ -1208,6 +1208,22 @@
+ 	 * properties will be handled in the default case.
+ 	 */
+ 	switch (ptype) {
++	case HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO: {
++		struct hfi_uncompressed_plane_actual_constraints_info *in = pdata;
++		struct hfi_uncompressed_plane_actual_constraints_info *info = prop_data;
++
++		if (!in->num_planes || in->num_planes > 2)
++			return -EINVAL;
++		memset(info, 0, sizeof(*info));
++		info->buffer_type = in->buffer_type;
++		info->num_planes = in->num_planes;
++		info->plane_format[0] = in->plane_format[0];
++		if (in->num_planes > 1)
++			info->plane_format[1] = in->plane_format[1];
++
++		pkt->shdr.hdr.size += sizeof(u32) + sizeof(*info);
++		break;
++	}
+ 	case HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL: {
+ 		struct hfi_buffer_count_actual *in = pdata;
+ 		struct hfi_buffer_count_actual_4xx *count = prop_data;
+@@ -1314,19 +1330,6 @@
+ 	pkt->data[0] = ptype;
+ 
+ 	switch (ptype) {
+-	case HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO: {
+-		struct hfi_uncompressed_plane_actual_constraints_info *in = pdata;
+-		struct hfi_uncompressed_plane_actual_constraints_info *info = prop_data;
+-
+-		info->buffer_type = in->buffer_type;
+-		info->num_planes = in->num_planes;
+-		info->plane_format[0] = in->plane_format[0];
+-		if (in->num_planes > 1)
+-			info->plane_format[1] = in->plane_format[1];
+-
+-		pkt->shdr.hdr.size += sizeof(u32) + sizeof(*info);
+-		break;
+-	}
+ 	case HFI_PROPERTY_CONFIG_HEIC_FRAME_QUALITY: {
+ 		struct hfi_heic_frame_quality *in = pdata, *cq = prop_data;
+ 
+diff -ruN a/drivers/media/platform/qcom/venus/hfi.h b/drivers/media/platform/qcom/venus/hfi.h
+--- a/drivers/media/platform/qcom/venus/hfi.h	2026-11-20 21:12:15.935717170 +0100
++++ b/drivers/media/platform/qcom/venus/hfi.h	2026-11-20 21:12:16.276349360 +0100
+@@ -56,6 +56,7 @@
+ 
+ /* HFI event callback structure */
+ struct hfi_event_data {
++	u32 sq2_sequence_fields;
+ 	u32 error;
+ 	u32 height;
+ 	u32 width;
+diff -ruN a/drivers/media/platform/qcom/venus/hfi_helper.h b/drivers/media/platform/qcom/venus/hfi_helper.h
+--- a/drivers/media/platform/qcom/venus/hfi_helper.h	2026-11-20 21:12:15.935884627 +0100
++++ b/drivers/media/platform/qcom/venus/hfi_helper.h	2026-11-20 21:12:16.285450762 +0100
+@@ -273,6 +273,9 @@
+ #define HFI_H264_LEVEL_5			0x00004000
+ #define HFI_H264_LEVEL_51			0x00008000
+ #define HFI_H264_LEVEL_52			0x00010000
++#define HFI_H264_LEVEL_6			0x00020000
++#define HFI_H264_LEVEL_61			0x00040000
++#define HFI_H264_LEVEL_62			0x00080000
+ 
+ #define HFI_H263_PROFILE_BASELINE		0x00000001
+ 
+diff -ruN a/drivers/media/platform/qcom/venus/hfi_msgs.c b/drivers/media/platform/qcom/venus/hfi_msgs.c
+--- a/drivers/media/platform/qcom/venus/hfi_msgs.c	2026-11-20 21:12:15.936085210 +0100
++++ b/drivers/media/platform/qcom/venus/hfi_msgs.c	2026-11-20 21:12:16.014475151 +0100
+@@ -14,6 +14,7 @@
+ #include "hfi_helper.h"
+ #include "hfi_msgs.h"
+ #include "hfi_parser.h"
++#include "venus-sq2-vp9-eos.h"
+ 
+ #define SMEM_IMG_VER_TBL	469
+ #define VER_STR_SZ		128
+@@ -74,6 +75,7 @@
+ 			frame_sz = (struct hfi_framesize *)data_ptr;
+ 			event.width = frame_sz->width;
+ 			event.height = frame_sz->height;
++			event.sq2_sequence_fields |= 1;
+ 			size_read = sizeof(struct hfi_framesize);
+ 			break;
+ 		case HFI_PROPERTY_PARAM_PROFILE_LEVEL_CURRENT:
+@@ -91,6 +93,7 @@
+ 
+ 			pixel_depth = (struct hfi_bit_depth *)data_ptr;
+ 			event.bit_depth = pixel_depth->bit_depth;
++			event.sq2_sequence_fields |= 2;
+ 			size_read = sizeof(struct hfi_bit_depth);
+ 			break;
+ 		case HFI_PROPERTY_PARAM_VDEC_PIC_STRUCT:
+@@ -99,6 +102,7 @@
+ 
+ 			pic_struct = (struct hfi_pic_struct *)data_ptr;
+ 			event.pic_struct = pic_struct->progressive_only;
++			event.sq2_sequence_fields |= 4;
+ 			size_read = sizeof(struct hfi_pic_struct);
+ 			break;
+ 		case HFI_PROPERTY_PARAM_VDEC_COLOUR_SPACE:
+@@ -107,6 +111,7 @@
+ 
+ 			colour_info = (struct hfi_colour_space *)data_ptr;
+ 			event.colour_space = colour_info->colour_space;
++			event.sq2_sequence_fields |= 8;
+ 			size_read = sizeof(struct hfi_colour_space);
+ 			break;
+ 		case HFI_PROPERTY_CONFIG_VDEC_ENTROPY:
+@@ -229,6 +234,15 @@
+ 
+ 	if (!packet)
+ 		return;
++	/* Closing sessions reject callbacks; only SYS_ERROR is sessionless. */
++	if (!inst && pkt->event_id != HFI_EVENT_SYS_ERROR) {
++		if (pkt->shdr.hdr.size >= offsetof(struct hfi_msg_event_notify_pkt, ext_event_data))
++			dev_warn_ratelimited(core->dev,
++				"late HFI event session:%x event:%x data1:%x data2:%x\n",
++				pkt->shdr.session_id, pkt->event_id,
++				pkt->event_data1, pkt->event_data2);
++		return;
++	}
+ 
+ 	switch (pkt->event_id) {
+ 	case HFI_EVENT_SYS_ERROR:
+@@ -273,7 +287,10 @@
+ 		goto done;
+ 	}
+ 
+-	error = hfi_parser(core, inst, pkt->data, rem_bytes);
++	if (IS_SQ2_HFI(core))
++		error = venus_sq2_hfi_capabilities(core, pkt->data, rem_bytes, pkt->num_properties);
++	else
++		error = hfi_parser(core, inst, pkt->data, rem_bytes);
+ 
+ done:
+ 	core->error = error;
+@@ -528,7 +545,8 @@
+ 
+ 	inst->error = pkt->error_type;
+ 	complete(&inst->done);
+-	if (inst->ops->flush_done)
++	if (inst->ops->flush_done &&
++	    (!IS_SQ2_HFI(core) || !READ_ONCE(inst->sq2_closing)))
+ 		inst->ops->flush_done(inst);
+ }
+ 
+@@ -583,6 +601,9 @@
+ 			buffer_type = HFI_BUFFER_OUTPUT2;
+ 
+ 		error = pkt->error_type;
++		hfi_flags = venus_sq2_vp9_eos_flags(
++			IS_SQ2_HFI(core) && inst->hfi_codec == HFI_VIDEO_CODEC_VP9,
++			error, filled_len, offset, hfi_flags);
+ 	} else {
+ 		error = HFI_ERR_SESSION_INVALID_PARAMETER;
+ 	}
+@@ -664,6 +685,11 @@
+ {
+ 	struct hfi_msg_session_end_done_pkt *pkt = packet;
+ 
++	if (IS_SQ2_HFI(core)) {
++		inst->sq2_end_error = pkt->error_type;
++		complete(&inst->sq2_end_done);
++		return;
++	}
+ 	inst->error = pkt->error_type;
+ 	complete(&inst->done);
+ }
+@@ -686,6 +712,8 @@
+ 	complete(&inst->done);
+ }
+ 
++#include "venus-sq2-callback.h"
++
+ struct hfi_done_handler {
+ 	u32 pkt;
+ 	u32 pkt_sz;
+@@ -789,13 +817,14 @@
+ 	event_sys_error(core, EVT_SYS_WATCHDOG_TIMEOUT, NULL);
+ }
+ 
+-static struct venus_inst *to_instance(struct venus_core *core, u32 session_id)
++static struct venus_inst *to_instance(struct venus_core *core, u32 session_id, u32 packet)
+ {
+ 	struct venus_inst *inst;
+ 
+ 	mutex_lock(&core->lock);
+ 	list_for_each_entry(inst, &core->instances, list)
+ 		if (hash32_ptr(inst) == session_id) {
++			if (!sq2_callback_get(inst, packet)) break;
+ 			mutex_unlock(&core->lock);
+ 			return inst;
+ 		}
+@@ -837,10 +866,10 @@
+ 		struct hfi_session_pkt *pkt;
+ 
+ 		pkt = (struct hfi_session_pkt *)hdr;
+-		inst = to_instance(core, pkt->shdr.session_id);
++		inst = to_instance(core, pkt->shdr.session_id, hdr->pkt_type);
+ 
+ 		if (!inst)
+-			dev_warn(dev, "no valid instance(pkt session_id:%x, pkt:%x)\n",
++			dev_warn_ratelimited(dev, "no valid instance(pkt session_id:%x, pkt:%x)\n",
+ 				 pkt->shdr.session_id,
+ 				 handler ? handler->pkt : 0);
+ 
+@@ -849,13 +878,14 @@
+ 		 * associated with it
+ 		 */
+ 		if (!inst && hdr->pkt_type != HFI_MSG_EVENT_NOTIFY) {
+-			dev_err(dev, "got invalid session id:%x\n",
++			dev_err_ratelimited(dev, "got invalid session id:%x\n",
+ 				pkt->shdr.session_id);
+ 			goto invalid_session;
+ 		}
+ 	}
+ 
+ 	handler->done(core, inst, hdr);
++	sq2_callback_put(inst);
+ 
+ invalid_session:
+ 	return hdr->pkt_type;
+diff -ruN a/drivers/media/platform/qcom/venus/hfi_parser.c b/drivers/media/platform/qcom/venus/hfi_parser.c
+--- a/drivers/media/platform/qcom/venus/hfi_parser.c	2026-11-20 21:12:15.936364704 +0100
++++ b/drivers/media/platform/qcom/venus/hfi_parser.c	2026-11-20 21:12:16.024000898 +0100
+@@ -10,6 +10,7 @@
+ #include "core.h"
+ #include "hfi_helper.h"
+ #include "hfi_parser.h"
++#include "venus-sq2-capabilities.h"
+ 
+ typedef void (*func)(struct hfi_plat_caps *cap, const void *data,
+ 		     unsigned int size);
+@@ -385,3 +386,8 @@
+ 
+ 	return HFI_ERR_NONE;
+ }
++
++u32 venus_sq2_hfi_capabilities(struct venus_core *core, void *buf, u32 size, u32 count)
++{
++	return venus_sq2_parse_capabilities(core, buf, size, count);
++}
+diff -ruN a/drivers/media/platform/qcom/venus/hfi_parser.h b/drivers/media/platform/qcom/venus/hfi_parser.h
+--- a/drivers/media/platform/qcom/venus/hfi_parser.h	2026-11-20 21:12:15.936476949 +0100
++++ b/drivers/media/platform/qcom/venus/hfi_parser.h	2026-11-20 21:12:16.300728053 +0100
+@@ -118,3 +118,5 @@
+ }
+ 
+ #endif
++
++u32 venus_sq2_hfi_capabilities(struct venus_core *core, void *buf, u32 size, u32 count);
+diff -ruN a/drivers/media/platform/qcom/venus/hfi_venus.c b/drivers/media/platform/qcom/venus/hfi_venus.c
+--- a/drivers/media/platform/qcom/venus/hfi_venus.c	2026-11-20 21:12:15.937384183 +0100
++++ b/drivers/media/platform/qcom/venus/hfi_venus.c	2026-11-20 21:12:16.068540048 +0100
+@@ -11,6 +11,8 @@
+ #include <linux/iopoll.h>
+ #include <linux/kernel.h>
+ #include <linux/slab.h>
++#include <linux/iommu.h>
++#include "sq2-venus-dma.h"
+ 
+ #include "core.h"
+ #include "hfi_cmds.h"
+@@ -18,6 +20,7 @@
+ #include "hfi_venus.h"
+ #include "hfi_venus_io.h"
+ #include "firmware.h"
++#include "venus-iris1.h"
+ 
+ #define HFI_MASK_QHDR_TX_TYPE		0xff000000
+ #define HFI_MASK_QHDR_RX_TYPE		0x00ff0000
+@@ -113,6 +116,7 @@
+ 
+ struct venus_hfi_device {
+ 	struct venus_core *core;
++	struct sq2_venus_dma sq2_dma;
+ 	u32 irq_status;
+ 	u32 last_packet_type;
+ 	bool power_enabled;
+@@ -346,7 +350,7 @@
+ {
+ 	struct device *dev = hdev->core->dev;
+ 
+-	desc->attrs = DMA_ATTR_WRITE_COMBINE;
++	desc->attrs = IS_SQ2_HFI(hdev->core) ? 0 : DMA_ATTR_WRITE_COMBINE;
+ 	desc->size = ALIGN(size, SZ_4K);
+ 
+ 	desc->kva = dma_alloc_attrs(dev, desc->size, &desc->da, GFP_KERNEL,
+@@ -473,7 +477,9 @@
+ 	void __iomem *wrapper_base = hdev->core->wrapper_base;
+ 	int ret = 0;
+ 
+-	if (IS_IRIS2(hdev->core) || IS_IRIS2_1(hdev->core)) {
++	if (IS_IRIS1(hdev->core)) {
++		mask_val = venus_iris1_irq_mask(readl(wrapper_base + WRAPPER_INTR_MASK));
++	} else if (IS_IRIS2(hdev->core) || IS_IRIS2_1(hdev->core)) {
+ 		mask_val = readl(wrapper_base + WRAPPER_INTR_MASK);
+ 		mask_val &= ~(WRAPPER_INTR_MASK_A2HWD_BASK_V6 |
+ 			      WRAPPER_INTR_MASK_A2HCPU_MASK);
+@@ -498,7 +504,7 @@
+ 		count++;
+ 	}
+ 
+-	if (count >= max_tries)
++	if (!ctrl_status && count >= max_tries)
+ 		ret = -ETIMEDOUT;
+ 
+ 	if (IS_IRIS2(hdev->core) || IS_IRIS2_1(hdev->core) || IS_AR50_LITE(hdev->core)) {
+@@ -540,14 +546,23 @@
+ 	 * Re-program all of the registers that get reset as a result of
+ 	 * regulator_disable() and _enable()
+ 	 */
++	if (IS_IRIS1(hdev->core))
++		venus_iris1_clock_config(hdev->core);
+ 	venus_set_registers(hdev);
+ 
++	if (IS_SQ2_HFI(hdev->core)) {
++		venus_sq2_cpu_map(hdev->core, hdev->ifaceq_table.da, hdev->sfr.da);
++	} else {
+ 	writel(hdev->ifaceq_table.da, cpu_cs_base + UC_REGION_ADDR);
+ 	writel(SHARED_QSIZE, cpu_cs_base + UC_REGION_SIZE);
+ 	writel(hdev->ifaceq_table.da, cpu_cs_base + CPU_CS_SCIACMDARG2);
+ 	writel(0x01, cpu_cs_base + CPU_CS_SCIACMDARG1);
+ 	if (hdev->sfr.da)
+ 		writel(hdev->sfr.da, cpu_cs_base + SFR_ADDR);
++	}
++
++	if (IS_IRIS1(hdev->core) && !IS_SQ2_HFI(hdev->core))
++		venus_iris1_dsp_map(hdev->core, hdev->ifaceq_table.da, SHARED_QSIZE);
+ 
+ 	ret = venus_boot_core(hdev);
+ 	if (ret) {
+@@ -780,7 +795,8 @@
+ 	mutex_lock(&hdev->lock);
+ 
+ 	venus_free(hdev, &hdev->ifaceq_table);
+-	venus_free(hdev, &hdev->sfr);
++	if (!IS_SQ2_HFI(hdev->core))
++		venus_free(hdev, &hdev->sfr);
+ 
+ 	memset(hdev->queues, 0, sizeof(hdev->queues));
+ 	memset(&hdev->ifaceq_table, 0, sizeof(hdev->ifaceq_table));
+@@ -799,10 +815,19 @@
+ 	unsigned int i;
+ 	int ret;
+ 
+-	ret = venus_alloc(hdev, &desc, ALIGNED_QUEUE_SIZE);
++	ret = venus_alloc(hdev, &desc, IS_SQ2_HFI(hdev->core) ?
++		SQ2_VENUS_UC_BYTES : ALIGNED_QUEUE_SIZE);
+ 	if (ret)
+ 		return ret;
+ 
++	if (IS_SQ2_HFI(hdev->core)) {
++		ret = sq2_venus_dma_check_uc(hdev->core->dev, desc.da, desc.size);
++		if (ret) {
++			venus_free(hdev, &desc);
++			return ret;
++		}
++		memset(desc.kva, 0, desc.size);
++	}
+ 	hdev->ifaceq_table = desc;
+ 	offset = IFACEQ_TABLE_SIZE;
+ 
+@@ -842,7 +867,15 @@
+ 	queue = &hdev->queues[IFACEQ_DBG_IDX];
+ 	queue->qhdr->rx_req = 0;
+ 
+-	ret = venus_alloc(hdev, &desc, ALIGNED_SFR_SIZE);
++	if (IS_SQ2_HFI(hdev->core)) {
++		desc = hdev->ifaceq_table;
++		desc.da += ALIGNED_QUEUE_SIZE;
++		desc.kva += ALIGNED_QUEUE_SIZE;
++		desc.size = ALIGNED_SFR_SIZE;
++		ret = 0;
++	} else {
++		ret = venus_alloc(hdev, &desc, ALIGNED_SFR_SIZE);
++	}
+ 	if (ret) {
+ 		hdev->sfr.da = 0;
+ 	} else {
+@@ -960,7 +993,8 @@
+ 			dev_warn(dev, "setting idle response ON failed (%d)\n", ret);
+ 	}
+ 
+-	ret = venus_sys_set_power_control(hdev, venus_fw_low_power_mode);
++	ret = venus_sys_set_power_control(hdev, IS_SQ2_HFI(hdev->core) ?
++		false : venus_fw_low_power_mode);
+ 	if (ret)
+ 		dev_warn(dev, "setting hw power collapse ON failed (%d)\n",
+ 			 ret);
+@@ -1200,6 +1234,14 @@
+ {
+ 	struct venus_hfi_device *hdev = to_hfi_priv(core);
+ 
++	if (IS_SQ2_HFI(core)) {
++		mutex_lock(&hdev->lock);
++		hdev->state = VENUS_STATE_DEINIT;
++		hdev->suspended = true;
++		hdev->power_enabled = false;
++		mutex_unlock(&hdev->lock);
++		return 0;
++	}
+ 	venus_set_state(hdev, VENUS_STATE_DEINIT);
+ 	hdev->suspended = true;
+ 	hdev->power_enabled = false;
+@@ -1467,6 +1509,13 @@
+ 
+ 	mutex_lock(&hdev->lock);
+ 
++	/* Serialize against terminal deinit before any power/MMIO access. */
++	if (IS_SQ2_HFI(core) && (!venus_is_valid_state(hdev) ||
++	    test_bit(0, &core->sys_error))) {
++		ret = -EIO;
++		goto unlock;
++	}
++
+ 	if (!hdev->suspended)
+ 		goto unlock;
+ 
+@@ -1579,7 +1628,7 @@
+ 	return false;
+ }
+ 
+-static int venus_suspend_3xx(struct venus_core *core)
++static int venus_suspend_3xx(struct venus_core *core, bool prepare_only)
+ {
+ 	struct venus_hfi_device *hdev = to_hfi_priv(core);
+ 	struct device *dev = core->dev;
+@@ -1631,6 +1680,10 @@
+ 		return ret;
+ 
+ power_off:
++	/* SQ2 owns reset/unmap separately. Its system stop must first let the
++	 * firmware finish the normal PC_PREP protocol while IRQs remain enabled. */
++	if (prepare_only)
++		return 0;
+ 	mutex_lock(&hdev->lock);
+ 
+ 	ret = venus_power_off(hdev);
+@@ -1647,10 +1700,18 @@
+ 	return 0;
+ }
+ 
++int venus_hfi_prepare_system_stop(struct venus_core *core)
++{
++	if (!IS_SQ2_HFI(core) || !IS_V4(core) || !core->priv ||
++	    !core->sq2_no_tz_active || test_bit(0, &core->sys_error))
++		return -EINVAL;
++	return venus_suspend_3xx(core, true);
++}
++
+ static int venus_suspend(struct venus_core *core)
+ {
+ 	if (IS_V3(core) || IS_V4(core) || IS_V6(core))
+-		return venus_suspend_3xx(core);
++		return venus_suspend_3xx(core, false);
+ 
+ 	return venus_suspend_1xx(core);
+ }
+@@ -1691,6 +1752,7 @@
+ 
+ 	core->priv = NULL;
+ 	venus_interface_queues_release(hdev);
++	sq2_venus_dma_restore(core->dev, &hdev->sq2_dma);
+ 	mutex_destroy(&hdev->lock);
+ 	kfree(hdev);
+ 	disable_irq(core->irq);
+@@ -1702,6 +1764,10 @@
+ 	struct venus_hfi_device *hdev;
+ 	int ret;
+ 
++	/* No implicit activation on existing HFI4 platforms. */
++	if (IS_SQ2_HFI(core) && (!IS_IRIS1(core) || !IS_V4(core)))
++		return -EINVAL;
++
+ 	hdev = kzalloc_obj(*hdev);
+ 	if (!hdev)
+ 		return -ENOMEM;
+@@ -1713,6 +1779,11 @@
+ 	core->priv = hdev;
+ 	core->ops = &venus_hfi_ops;
+ 
++	if (IS_SQ2_HFI(core)) {
++		ret = sq2_venus_dma_begin(core->dev, &hdev->sq2_dma);
++		if (ret)
++			goto err_kfree;
++	}
+ 	ret = venus_interface_queues_init(hdev);
+ 	if (ret)
+ 		goto err_kfree;
+@@ -1720,6 +1791,8 @@
+ 	return 0;
+ 
+ err_kfree:
++	sq2_venus_dma_restore(core->dev, &hdev->sq2_dma);
++	mutex_destroy(&hdev->lock);
+ 	kfree(hdev);
+ 	core->priv = NULL;
+ 	core->ops = NULL;
+diff -ruN a/drivers/media/platform/qcom/venus/hfi_venus.h b/drivers/media/platform/qcom/venus/hfi_venus.h
+--- a/drivers/media/platform/qcom/venus/hfi_venus.h	2026-11-20 21:12:15.937553618 +0100
++++ b/drivers/media/platform/qcom/venus/hfi_venus.h	2026-11-20 21:12:16.327551766 +0100
+@@ -8,6 +8,7 @@
+ 
+ struct venus_core;
+ 
++int venus_hfi_prepare_system_stop(struct venus_core *core);
+ void venus_hfi_destroy(struct venus_core *core);
+ int venus_hfi_create(struct venus_core *core);
+ void venus_hfi_queues_reinit(struct venus_core *core);
+diff -ruN a/drivers/media/platform/qcom/venus/Makefile b/drivers/media/platform/qcom/venus/Makefile
+--- a/drivers/media/platform/qcom/venus/Makefile	2026-11-20 21:12:15.937829518 +0100
++++ b/drivers/media/platform/qcom/venus/Makefile	2026-11-20 21:12:16.642829536 +0100
+@@ -13,3 +13,10 @@
+ obj-$(CONFIG_VIDEO_QCOM_VENUS) += venus-core.o
+ obj-$(CONFIG_VIDEO_QCOM_VENUS) += venus-dec.o
+ obj-$(CONFIG_VIDEO_QCOM_VENUS) += venus-enc.o
++
++venus-core-objs += sq2-venus-platform.o sq2-venus-power.o sq2-venus-retire.o
++
++venus-core-objs += sq2-venus-fw.o sq2_pil_mem_query.o
++ccflags-y += -DSQ2_PIL_QUERY_LIBRARY -I$(srctree)/drivers/firmware -I$(srctree)/drivers/firmware/qcom
++
++ccflags-y += -DSQ2_VENUS_SYSTEM_PM
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-fw-transaction.h b/drivers/media/platform/qcom/venus/sq2-fw-transaction.h
+--- a/drivers/media/platform/qcom/venus/sq2-fw-transaction.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-fw-transaction.h	2026-11-20 21:12:16.361034049 +0100
+@@ -0,0 +1,68 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef SQ2_FW_TRANSACTION_H
++#define SQ2_FW_TRANSACTION_H
++#ifdef __KERNEL__
++#include <linux/errno.h>
++#else
++#include <errno.h>
++#endif
++/* The caller serializes operations. alloc must undo partial allocation on error.
++ * release must not destroy this transaction object. No automatic quarantine
++ * retry: an unconfirmed PAS shutdown requires a board reboot.
++ */
++enum sq2_fw_state { SQ2_FW_EMPTY, SQ2_FW_OWNED, SQ2_FW_TOUCHED,
++                    SQ2_FW_LIVE, SQ2_FW_QUARANTINED };
++struct sq2_fw_transaction {
++ enum sq2_fw_state state;
++ int stop_error;
++};
++struct sq2_fw_operations {
++ int (*alloc)(void *);
++ int (*load)(void *);
++ int (*start)(void *);
++ int (*stop)(void *);
++ void (*release)(void *);
++};
++static int sq2_fw_stop(struct sq2_fw_transaction *t,
++                       const struct sq2_fw_operations *ops, void *ctx)
++{
++ int ret;
++ if (t->state == SQ2_FW_EMPTY)
++  return 0;
++ if (t->state == SQ2_FW_QUARANTINED)
++  return t->stop_error;
++ if (t->state != SQ2_FW_OWNED) {
++  ret = ops->stop(ctx);
++  if (ret) {
++   t->stop_error = ret;
++   t->state = SQ2_FW_QUARANTINED;
++   return ret;
++  }
++ }
++ ops->release(ctx);
++ t->state = SQ2_FW_EMPTY;
++ return 0;
++}
++static int sq2_fw_start(struct sq2_fw_transaction *t,
++                        const struct sq2_fw_operations *ops, void *ctx)
++{
++ int ret;
++ if (t->state != SQ2_FW_EMPTY)
++  return -EBUSY;
++ ret = ops->alloc(ctx);
++ if (ret)
++  return ret;
++ t->state = SQ2_FW_OWNED;
++ /* Even failed load may have handed metadata/memory to secure world. */
++ t->state = SQ2_FW_TOUCHED;
++ ret = ops->load(ctx);
++ if (!ret)
++  ret = ops->start(ctx);
++ if (ret) {
++  sq2_fw_stop(t, ops, ctx);
++  return ret;
++ }
++ t->state = SQ2_FW_LIVE;
++ return 0;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-hfi-properties.h b/drivers/media/platform/qcom/venus/sq2-hfi-properties.h
+--- a/drivers/media/platform/qcom/venus/sq2-hfi-properties.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-hfi-properties.h	2026-11-20 21:12:16.371871217 +0100
+@@ -0,0 +1,56 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef SQ2_HFI_PROPERTIES_H
++#define SQ2_HFI_PROPERTIES_H
++/* Host/kernel shared walker for the observed Iris1 SYS_INIT body. u32 must be
++ * supplied by the caller. Callback payloads are bounded; consumers must also
++ * bound their destination arrays and publish only after the whole walk passes.
++ */
++typedef int (*sq2_hfi_property_fn)(void *, u32, const u32 *, u32);
++static inline int sq2_hfi_properties(const u32 *body, u32 words,
++                                    sq2_hfi_property_fn visit, void *context,
++                                    u32 *records)
++{
++ u32 at=0, count=0;
++ if(!body||!words||words>4096||!records)return -1;
++ while(at<words){
++  u32 id=body[at++], start=at, n, i, planes;
++  switch(id){
++  case 0x1009: case 0x100e:
++   if(words-at<2)return -1;
++   at+=2;break;
++  case 0x1010: case 0x100a:
++   if(words-at<1)return -1;
++   at++;break;
++  case 0x1016:
++   /* Observed trailing TME version: do not infer a variable-size layout. */
++   if(words-at!=1)return -1;
++   at++;break;
++  case 0x1007: case 0x1006:
++   if(words-at<1)return -1;
++   n=body[at++];i=id==0x1007?4:2;
++   if(n>(words-at)/i)return -1;
++   at+=n*i;break;
++  case 0x20100b:
++   if(words-at<2)return -1;
++   n=body[at+1];at+=2;
++   if(n>words-at)return -1;
++   at+=n;break;
++  case 0x1004:
++   if(words-at<2)return -1;
++   n=body[at+1];at+=2;
++   if(n>(words-at)/2)return -1;
++   for(i=0;i<n;i++){
++    if(words-at<2)return -1;
++    planes=body[at+1];at+=2;
++    if(!planes||planes>4||planes>(words-at)/4)return -1;
++    at+=planes*4;
++   }
++   break;
++  default:return -1;
++  }
++  if(visit&&visit(context,id,body+start,at-start))return -1;
++  count++;
++ }
++ *records=count;return 0;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/sq2_pil_mem_query.c b/drivers/media/platform/qcom/venus/sq2_pil_mem_query.c
+--- a/drivers/media/platform/qcom/venus/sq2_pil_mem_query.c	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2_pil_mem_query.c	2026-11-20 21:12:16.093612110 +0100
+@@ -0,0 +1,86 @@
++#include <linux/platform_device.h>
++// SPDX-License-Identifier: GPL-2.0-only
++/* Read-only TZ_PIL_GET_MEM_AREA (PIL cmd9, spare0, arginfo1).
++ * Linux 6.3 has no exported wrapper. Resolve only the pinned private SCM call
++ * entry, then unregister the address lookup probe before invoking it normally.
++ * The SCM driver performs convention selection, locking, waitq and retries.
++ * No load, memory assignment, authentication, register write or firmware start.
++ */
++#include <linux/module.h>
++#include <linux/kprobes.h>
++#include <linux/of.h>
++#include <linux/of_platform.h>
++#include <linux/firmware/qcom/qcom_scm.h>
++#include <linux/arm-smccc.h>
++#include "qcom_scm.h"
++#include "sq2-pil-region.h"
++#ifndef SQ2_PIL_QUERY_LIBRARY
++static bool allow;
++module_param(allow, bool, 0400);
++#endif
++int sq2_pil_get_bounds(phys_addr_t *start, phys_addr_t *end)
++{
++ struct device_node *node;
++ struct platform_device *pdev;
++ struct kprobe lookup = { .symbol_name = "qcom_scm_call" };
++ int (*call)(struct device *, const struct qcom_scm_desc *, struct qcom_scm_res *);
++ struct qcom_scm_desc desc = {
++  .svc = QCOM_SCM_SVC_PIL, .cmd = 9, .arginfo = QCOM_SCM_ARGS(1),
++  .args = {0}, .owner = ARM_SMCCC_OWNER_SIP,
++ };
++ struct qcom_scm_res result = {0};
++ int ret;
++ if (!of_machine_is_compatible("microsoft,surface-pro-x"))
++  return -EPERM;
++ if (!qcom_scm_is_available())
++  return -EPROBE_DEFER;
++ node = of_find_node_by_path("/firmware/scm");
++ if (!node)
++  return -ENODEV;
++ if (!of_device_is_compatible(node, "qcom,scm-sc8180x")) {
++  of_node_put(node);
++  return -EINVAL;
++ }
++ pdev = of_find_device_by_node(node);
++ of_node_put(node);
++ if (!pdev)
++  return -ENODEV;
++ if (!pdev->dev.driver) {
++  ret = -ENODEV;
++  goto put;
++ }
++ ret = register_kprobe(&lookup);
++ if (ret)
++  goto put;
++ call = (void *)lookup.addr;
++ unregister_kprobe(&lookup);
++ pr_info("SQ2_PIL_MEM_QUERY begin cmd=9 spare=0 READ_ONLY\n");
++ ret = call(&pdev->dev, &desc, &result);
++ pr_info("SQ2_PIL_MEM_QUERY end ret=%d result=%llx,%llx,%llx; not an ownership grant\n",
++         ret, result.result[0], result.result[1], result.result[2]);
++ if (!ret) {
++  if (!result.result[0] || result.result[1] <= result.result[0] ||
++      result.result[1] > (1ULL << 32))
++   ret = -ERANGE;
++  else {
++   *start = result.result[0];
++   *end = result.result[1];
++  }
++ }
++put:
++ put_device(&pdev->dev);
++ return ret;
++}
++#ifndef SQ2_PIL_QUERY_LIBRARY
++static int __init query(void)
++{
++ phys_addr_t start, end;
++ if (!allow) return -EPERM;
++ return sq2_pil_get_bounds(&start, &end);
++}
++static void __exit done(void) { }
++module_init(query);
++module_exit(done);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("Read-only documented PIL load-region query for SQ2 lab");
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-pil-region.h b/drivers/media/platform/qcom/venus/sq2-pil-region.h
+--- a/drivers/media/platform/qcom/venus/sq2-pil-region.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-pil-region.h	2026-11-20 21:12:16.387035377 +0100
+@@ -0,0 +1,7 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef SQ2_PIL_REGION_H
++#define SQ2_PIL_REGION_H
++#include <linux/types.h>
++/* Read-only allowed window, never an ownership grant. */
++int sq2_pil_get_bounds(phys_addr_t *start, phys_addr_t *end);
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-venus-buffer.h b/drivers/media/platform/qcom/venus/sq2-venus-buffer.h
+--- a/drivers/media/platform/qcom/venus/sq2-venus-buffer.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-venus-buffer.h	2026-11-20 21:12:16.398210688 +0100
+@@ -0,0 +1,19 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef SQ2_VENUS_BUFFER_H
++#define SQ2_VENUS_BUFFER_H
++/* Full-width checks BEFORE assigning a DMA address to a 32-bit HFI field.
++ * This is the tested nonsecure intersection, not a change to SCM thresholds.
++ */
++static inline int sq2_venus_buffer_valid(unsigned long long addr,
++                                        unsigned long long size)
++{
++ return size && addr >= 0x25800000ULL && addr < 0xc0000000ULL &&
++        size <= 0xc0000000ULL - addr;
++}
++static inline int sq2_venus_payload_valid(unsigned long long length,
++                                         unsigned long long used,
++                                         unsigned long long offset)
++{
++ return offset <= used && used <= length;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-venus-dma.h b/drivers/media/platform/qcom/venus/sq2-venus-dma.h
+--- a/drivers/media/platform/qcom/venus/sq2-venus-dma.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-venus-dma.h	2026-11-20 21:12:16.407163541 +0100
+@@ -0,0 +1,83 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Include after linux/{dma-mapping,iommu,sizes}.h. No MMIO or PAS access.
++ * The HFI owner keeps this lease until all its DMA allocations are released.
++ * This limits allocation addresses; it does not change SCM protection ranges.
++ */
++#ifndef SQ2_VENUS_DMA_H
++#define SQ2_VENUS_DMA_H
++struct sq2_venus_dma {
++ u64 mask, coherent, limit;
++ bool active;
++};
++
++static int sq2_venus_count_peer(struct device *dev, void *data)
++{
++ unsigned int *count = data;
++ (void)dev;
++ (*count)++;
++ return 0;
++}
++
++static void sq2_venus_dma_restore(struct device *dev, struct sq2_venus_dma *lease)
++{
++ if (!lease->active)
++  return;
++ *dev->dma_mask = lease->mask;
++ dev->coherent_dma_mask = lease->coherent;
++ dev->bus_dma_limit = lease->limit;
++ lease->active = false;
++}
++
++static int sq2_venus_dma_begin(struct device *dev, struct sq2_venus_dma *lease)
++{
++ struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
++ struct iommu_fwspec *spec = dev_iommu_fwspec_get(dev);
++ struct iommu_group *group;
++ unsigned int peers = 0;
++ int ret;
++
++ if (lease->active)
++  return -EBUSY;
++ if (!dev->dma_mask || !domain || !(domain->type & __IOMMU_DOMAIN_DMA_API) ||
++     !spec || spec->num_ids != 3 || spec->ids[0] != 0x2300 ||
++     spec->ids[1] != 0x2320 || spec->ids[2] != 0x2340)
++  return -ENODEV;
++ group = iommu_group_get(dev);
++ if (!group)
++  return -ENODEV;
++ ret = iommu_group_for_each_dev(group, &peers, sq2_venus_count_peer);
++ iommu_group_put(group);
++ if (ret || peers != 1)
++  return ret ? ret : -EBUSY;
++
++ lease->mask = *dev->dma_mask;
++ lease->coherent = dev->coherent_dma_mask;
++ lease->limit = dev->bus_dma_limit;
++ lease->active = true;
++ ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
++ if (ret) {
++  sq2_venus_dma_restore(dev, lease);
++  return ret;
++ }
++ /* Preserve any stricter upstream constraint; zero means unspecified. */
++ dev->bus_dma_limit = lease->limit && lease->limit < 0xbfffffffULL ?
++                      lease->limit : 0xbfffffffULL;
++ return 0;
++}
++
++static int sq2_venus_dma_check_uc(struct device *dev, dma_addr_t addr, u32 size)
++{
++ struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
++ u32 off;
++ if (!domain || !(domain->type & __IOMMU_DOMAIN_DMA_API) ||
++     size != SZ_16M || addr < 0x25800000ULL ||
++     addr > 0xc0000000ULL - size || !IS_ALIGNED(addr, SZ_1M))
++  return -ERANGE;
++ for (off = 0; off < size; off += PAGE_SIZE) {
++  phys_addr_t phys = iommu_iova_to_phys(domain, addr + off);
++  if (!phys || !IS_ALIGNED(phys, PAGE_SIZE))
++   return -EFAULT;
++ }
++ return 0;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-venus-fw.c b/drivers/media/platform/qcom/venus/sq2-venus-fw.c
+--- a/drivers/media/platform/qcom/venus/sq2-venus-fw.c	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-venus-fw.c	2026-11-20 21:12:16.107992011 +0100
+@@ -0,0 +1,545 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Partial Iris1 backend. No call site is enabled until platform and HFI resource
++ * lifetime are adapted. Never use devm for memory potentially owned by PAS9.
++ */
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/dma-mapping.h>
++#include <linux/dma-direct.h>
++#include <linux/iommu.h>
++#include <linux/of.h>
++#include <linux/firmware.h>
++#include <linux/mutex.h>
++#include <linux/sizes.h>
++#include <linux/io.h>
++#include <linux/ioport.h>
++#include <linux/of_address.h>
++#include <linux/of_device.h>
++#include <linux/delay.h>
++#include <asm/virt.h>
++#include <linux/firmware/qcom/qcom_scm.h>
++#include <linux/soc/qcom/mdt_loader.h>
++#include <crypto/hash.h>
++#include <crypto/sha2.h>
++#include "sq2_video_fw_layout.h"
++#include "sq2-fw-transaction.h"
++#include "sq2-venus-fw.h"
++#include "sq2-pil-region.h"
++#include "sq2-venus-no-tz.h"
++
++struct sq2_venus_fw {
++ struct sq2_fw_transaction tx;
++ struct platform_device *pdev;
++ const struct firmware *image; /* only retained during synchronous boot */
++ void *cpu;
++ dma_addr_t dma;
++ phys_addr_t phys;
++ bool pil_gap;
++ void __iomem *no_tz_base;
++ struct device *parent;
++ struct platform_device *stream;
++ struct iommu_domain *domain;
++ bool attached, mapped, cpu_touched;
++ struct resource region;
++};
++/* This owner and module pin outlive a failed core probe or driver teardown.
++ * One PAS9 owner per board; failed shutdown blocks all further boot attempts.
++ */
++static DEFINE_MUTEX(sq2_fw_lock);
++static struct sq2_venus_fw *sq2_fw_owner;
++static const char image_name[] = "qcom/venus-5.2/venus.mbn";
++
++/* System PM must not unregister/recreate devices while their parent and
++ * suppliers are suspended. Retain the no-TZ transport for this already-pinned
++ * core's lifetime. Firmware contents and IOVA mappings still stop/unmap on
++ * every cycle; this is not firmware retention or a failed-start retry.
++ * All accesses are serialized by sq2_fw_lock. */
++static struct platform_device *sq2_pm_memory_device;
++static struct platform_device *sq2_pm_stream_device;
++static struct iommu_domain *sq2_pm_stream_domain;
++static unsigned long sq2_pm_stream_reuses;
++module_param_named(sq2_pm_stream_reuses, sq2_pm_stream_reuses, ulong, 0400);
++
++static int sq2_fw_count_peer(struct device *dev, void *data)
++{
++ unsigned int *count = data;
++ (*count)++;
++ return 0;
++}
++
++static void sq2_fw_drop_stream(struct sq2_venus_fw *fw)
++{
++ if (fw->stream && fw->stream == sq2_pm_stream_device) {
++  /* The stopped transaction has unmapped its firmware. Keep the domain
++   * attached so the ordinary SMMU PM callbacks restore the same context. */
++  fw->attached = false;
++  fw->domain = NULL;
++  fw->stream = NULL;
++  return;
++ }
++ if (fw->attached) iommu_detach_device(fw->domain, &fw->stream->dev);
++ if (fw->domain) iommu_domain_free(fw->domain);
++ if (fw->stream) platform_device_unregister(fw->stream);
++ fw->attached = false;
++ fw->domain = NULL;
++ fw->stream = NULL;
++}
++
++static int sq2_fw_create_stream(struct sq2_venus_fw *fw)
++{
++ struct platform_device_info info = {0};
++ struct device_node *np;
++ struct of_phandle_args args;
++ struct iommu_fwspec *spec;
++ struct iommu_group *group;
++ unsigned int peers = 0;
++ int ret;
++
++ if (sq2_pm_stream_device) {
++  if (sq2_pm_stream_device->dev.parent != fw->parent ||
++      !sq2_pm_stream_domain) return -EINVAL;
++  fw->stream = sq2_pm_stream_device;
++  fw->domain = sq2_pm_stream_domain;
++  fw->attached = true;
++  sq2_pm_stream_reuses++;
++  pr_info("SQ2_PM_TRANSPORT reuse=%lu sid=2342\n", sq2_pm_stream_reuses);
++  return 0;
++ }
++ np = of_get_child_by_name(fw->parent->of_node, "video-firmware");
++ if (!np) return -ENODEV;
++ ret = of_parse_phandle_with_args(np, "iommus", "#iommu-cells", 0, &args);
++ if (ret) goto put;
++ ret = args.args_count == 2 && args.args[0] == 0x2342 && !args.args[1] &&
++       of_device_is_compatible(args.np, "qcom,sc8180x-smmu-500") &&
++       of_property_count_u32_elems(np, "iommus") == 3 ? 0 : -EINVAL;
++ of_node_put(args.np);
++ if (ret) goto put;
++ info.fwnode = of_fwnode_handle(np);
++ info.parent = fw->parent;
++ info.name = "sq2-venus-fw-stream";
++ info.id = PLATFORM_DEVID_NONE;
++ info.dma_mask = DMA_BIT_MASK(32);
++ fw->stream = platform_device_register_full(&info);
++ if (IS_ERR(fw->stream)) {
++  ret = PTR_ERR(fw->stream);
++  fw->stream = NULL;
++  goto put;
++ }
++ ret = of_dma_configure(&fw->stream->dev, np, true);
++ if (ret) goto fail;
++ spec = dev_iommu_fwspec_get(&fw->stream->dev);
++ if (!spec || spec->num_ids != 1 || spec->ids[0] != 0x2342) {
++  ret = -EINVAL;
++  goto fail;
++ }
++ group = iommu_group_get(&fw->stream->dev);
++ if (!group) { ret = -ENODEV; goto fail; }
++ ret = iommu_group_for_each_dev(group, &peers, sq2_fw_count_peer);
++ iommu_group_put(group);
++ if (ret || peers != 1) { ret = ret ? ret : -EBUSY; goto fail; }
++ fw->domain = iommu_paging_domain_alloc(&fw->stream->dev);
++ if (IS_ERR(fw->domain)) { ret = PTR_ERR(fw->domain); fw->domain = NULL; goto fail; }
++ ret = iommu_attach_device(fw->domain, &fw->stream->dev);
++ if (ret) goto fail;
++ fw->attached = true;
++ sq2_pm_stream_device = fw->stream;
++ sq2_pm_stream_domain = fw->domain;
++ /* One bounded lifetime pin, independent of each firmware transaction. */
++ __module_get(THIS_MODULE);
++ pr_info("SQ2_NO_TZ stream_attached sid=2342 singleton=1 retained_for_pm=1\n");
++ goto put;
++fail:
++ sq2_fw_drop_stream(fw);
++put:
++ of_node_put(np);
++ return ret;
++}
++
++static int sq2_fw_no_tz_stop(struct sq2_venus_fw *fw)
++{
++ size_t unmapped;
++ int ret;
++ if (fw->cpu_touched) {
++  ret = sq2_no_tz_stop_cpu(fw->no_tz_base);
++  pr_info("SQ2_NO_TZ reset_assert ret=%d\n", ret);
++  if (ret) return ret;
++  fw->cpu_touched = false;
++ }
++ if (fw->mapped) {
++  unmapped = iommu_unmap(fw->domain, 0, 0x500000);
++  pr_info("SQ2_NO_TZ unmapped=%zu expected=5242880\n", unmapped);
++  if (unmapped != 0x500000) return -EIO;
++  fw->mapped = false;
++ }
++ return 0;
++}
++
++/* Fixed Surface source marks 8bd80000..8d800000 free for the image loader.
++ * Claim only a 6MiB aligned subset. Query window alone is never sufficient.
++ */
++static int sq2_fw_claim_gap(struct sq2_venus_fw *fw)
++{
++ struct device_node *root, *np;
++ struct resource r;
++ phys_addr_t start, end;
++ const phys_addr_t base = 0x8c000000, limit = base + SQ2_FW_LIMIT;
++ int i, count, ret;
++ ret = sq2_pil_get_bounds(&start, &end);
++ if (ret) return ret;
++ if (start != 0x8b700000 || end != 0x9ab00000 || base < start || limit > end)
++  return -ERANGE;
++ if (region_intersects(base, SQ2_FW_LIMIT, IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE) != REGION_DISJOINT)
++  return -EBUSY;
++ root = of_find_node_by_path("/reserved-memory");
++ if (!root) return -EINVAL;
++ for_each_child_of_node(root, np) {
++  count = of_property_count_u32_elems(np, "reg");
++  if (count <= 0 || count % 4) { ret = -EINVAL; goto node_fail; }
++  for (i = 0; i < count / 4; i++) {
++   if (of_address_to_resource(np, i, &r)) { ret = -EINVAL; goto node_fail; }
++   if (r.start < limit && r.end >= base) { ret = -EBUSY; goto node_fail; }
++  }
++ }
++ of_node_put(root);
++ fw->region.start = base;
++ fw->region.end = limit - 1;
++ fw->region.name = "sq2-video-fw-lab";
++ fw->region.flags = IORESOURCE_MEM | IORESOURCE_BUSY;
++ ret = insert_resource(&iomem_resource, &fw->region);
++ if (ret) return ret;
++ /* No existing owner may be wrapped or nested under. Require the exact
++  * generic UEFI reserved window, not an arbitrary reserved block.
++  */
++ if (fw->region.child || !fw->region.parent ||
++     strcmp(fw->region.parent->name, "reserved") ||
++     fw->region.parent->start != start || fw->region.parent->end < end - 1) {
++  remove_resource(&fw->region);
++  return -EBUSY;
++ }
++ fw->cpu = memremap(base, SQ2_FW_LIMIT, MEMREMAP_WC);
++ if (!fw->cpu) { remove_resource(&fw->region); return -ENOMEM; }
++ fw->phys = base;
++ pr_info("SQ2_VENUS_FW gap_claimed phys=%pa bytes=%u; DT/IORESOURCE owners excluded\n",
++         &fw->phys, SQ2_FW_LIMIT);
++ return 0;
++node_fail:
++ of_node_put(np);
++ of_node_put(root);
++ return ret;
++}
++static void sq2_fw_unmap_gap(struct sq2_venus_fw *fw)
++{
++ memunmap(fw->cpu);
++ remove_resource(&fw->region);
++ fw->cpu = NULL;
++}
++int sq2_venus_fw_probe_gap(void)
++{
++ struct sq2_venus_fw *fw;
++ int ret;
++ fw = kzalloc(sizeof(*fw), GFP_KERNEL);
++ if (!fw) return -ENOMEM;
++ ret = sq2_fw_claim_gap(fw);
++ if (!ret) sq2_fw_unmap_gap(fw);
++ pr_info("SQ2_VENUS_FW gap_probe ret=%d NO_MEMORY_WRITES_NO_LOAD\n", ret);
++ kfree(fw);
++ return ret;
++}
++
++static int sq2_fw_check_image(const struct firmware *fw)
++{
++ static const u8 expected_00042[32] = {
++  0x4e,0x93,0xd3,0x45,0x04,0xda,0x96,0x32,0x07,0x75,0x47,0x6b,0xbd,0x50,0x9a,0xa0,
++  0x6f,0x98,0x5b,0x48,0xfb,0x78,0x1d,0x44,0x36,0xc8,0xeb,0x81,0x2b,0x92,0x99,0x28
++ };
++ static const u8 expected_00079[32] = {
++  0x89,0x19,0x97,0xec,0x15,0x6d,0xb8,0x3c,0xa6,0x60,0x35,0x9a,0x30,0xa7,0xc1,0x39,
++  0xa9,0x23,0xd9,0xb9,0x78,0x3e,0xad,0x52,0x30,0x51,0x81,0x63,0x03,0x61,0x4a,0x68
++ };
++ struct sq2_fw_layout layout;
++ struct crypto_shash *tfm;
++ struct shash_desc *desc;
++ u8 digest[32];
++ int ret;
++
++ if ((fw->size != 1159200 && fw->size != 1142816) ||
++     sq2_fw_layout(fw->data, fw->size, &layout) ||
++     qcom_mdt_get_size(fw) != layout.span)
++  return -ENOEXEC;
++ tfm = crypto_alloc_shash("sha256", 0, 0);
++ if (IS_ERR(tfm))
++  return PTR_ERR(tfm);
++ desc = kzalloc(sizeof(*desc) + crypto_shash_descsize(tfm), GFP_KERNEL);
++ if (!desc) {
++  ret = -ENOMEM;
++  goto out;
++ }
++ desc->tfm = tfm;
++ ret = crypto_shash_digest(desc, fw->data, fw->size, digest);
++ if (!ret && memcmp(digest, expected_00042, sizeof(digest)) &&
++     memcmp(digest, expected_00079, sizeof(digest)))
++  ret = -EKEYREJECTED;
++ kfree(desc);
++out:
++ crypto_free_shash(tfm);
++ return ret;
++}
++
++static int sq2_fw_alloc(void *ctx)
++{
++ struct sq2_venus_fw *fw = ctx;
++ struct device *dev;
++ int ret;
++
++ fw->pdev = fw->no_tz_base && sq2_pm_memory_device ? sq2_pm_memory_device :
++  platform_device_register_simple("sq2-venus-fw-memory", -1, NULL, 0);
++ if (IS_ERR(fw->pdev))
++  return PTR_ERR(fw->pdev);
++ dev = &fw->pdev->dev;
++ if (iommu_get_domain_for_dev(dev) || get_dma_ops(dev) || dev->dma_range_map) {
++  ret = -EINVAL;
++  goto unregister;
++ }
++ ret = dma_coerce_mask_and_coherent(dev, DMA_BIT_MASK(32));
++ if (ret)
++  goto unregister;
++ if (fw->pil_gap) {
++  ret = sq2_fw_claim_gap(fw);
++  if (ret) goto unregister;
++  goto pin;
++ }
++ fw->cpu = dma_alloc_coherent(dev, SQ2_FW_LIMIT, &fw->dma, GFP_KERNEL | __GFP_NOWARN);
++ if (!fw->cpu) {
++  ret = -ENOMEM;
++  goto unregister;
++ }
++ fw->phys = dma_to_phys(dev, fw->dma);
++ if (fw->phys != fw->dma || !IS_ALIGNED(fw->phys, SZ_1M) ||
++     fw->phys + SQ2_FW_LIMIT > (1ULL << 32)) {
++  ret = -ERANGE;
++  goto free;
++ }
++pin:
++ /* A quarantine must keep the module and auxiliary DMA device alive too. */
++ if (!try_module_get(THIS_MODULE)) {
++  ret = -ENODEV;
++  goto free;
++ }
++ if (fw->no_tz_base && !sq2_pm_memory_device) {
++  sq2_pm_memory_device = fw->pdev;
++  __module_get(THIS_MODULE);
++ }
++ memset(fw->cpu, 0, SQ2_FW_LIMIT);
++ pr_info("SQ2_VENUS_FW phase=allocated phys=%pa bytes=%u\n", &fw->phys, SQ2_FW_LIMIT);
++ return 0;
++free:
++ if (fw->pil_gap) sq2_fw_unmap_gap(fw);
++ else dma_free_coherent(dev, SQ2_FW_LIMIT, fw->cpu, fw->dma);
++ fw->cpu = NULL;
++unregister:
++ if (fw->pdev != sq2_pm_memory_device)
++  platform_device_unregister(fw->pdev);
++ fw->pdev = NULL;
++ return ret;
++}
++static int sq2_fw_no_tz_load(struct sq2_venus_fw *fw)
++{
++ u32 off;
++ int ret = sq2_fw_create_stream(fw);
++ if (ret) return ret;
++ ret = qcom_mdt_load_no_init(&fw->pdev->dev, fw->image, image_name,
++                           fw->cpu, fw->phys, SQ2_FW_LIMIT, NULL);
++ if (ret) return ret;
++ wmb();
++ ret = iommu_map(fw->domain, 0, fw->phys, 0x500000,
++                 IOMMU_READ | IOMMU_WRITE | IOMMU_PRIV, GFP_KERNEL);
++ if (ret) return ret;
++ fw->mapped = true;
++ for (off = 0; off < 0x500000; off += PAGE_SIZE)
++  if (iommu_iova_to_phys(fw->domain, off) != fw->phys + off) return -EFAULT;
++ pr_info("SQ2_NO_TZ mapped sid=2342 iova=0 phys=%pa bytes=5242880; all_pages_checked\n", &fw->phys);
++ return 0;
++}
++static int sq2_fw_load(void *ctx)
++{
++ struct sq2_venus_fw *fw = ctx;
++ const __be32 *prepared;
++ int ret, len;
++ pr_info("SQ2_VENUS_FW phase=mdt_load_begin\n");
++ if (fw->no_tz_base) return sq2_fw_no_tz_load(fw);
++ prepared = of_get_property(of_root, "microsoft,el2-venus-prepared", &len);
++ if (prepared) {
++  /* Only the checked EFI metadata handoff may skip Linux PAS init. */
++  if (len != 16 || be32_to_cpup(prepared) != 1 ||
++      be32_to_cpup(prepared + 1) != 9 ||
++      be32_to_cpup(prepared + 2) != 0x8c000000 ||
++      be32_to_cpup(prepared + 3) != 0x500000 ||
++      !fw->pil_gap || fw->phys != 0x8c000000 ||
++      !of_machine_is_compatible("qcom,sc8180x") ||
++      qcom_mdt_get_size(fw->image) != 0x500000)
++   return -EINVAL;
++  pr_info("SQ2_VENUS_FW phase=efi_prepared_no_init\n");
++  ret = qcom_mdt_load_no_init(&fw->pdev->dev, fw->image, image_name,
++                    fw->cpu, fw->phys, SQ2_FW_LIMIT, NULL);
++ } else {
++  ret = qcom_mdt_load(&fw->pdev->dev, fw->image, image_name, 9,
++                    fw->cpu, fw->phys, SQ2_FW_LIMIT, NULL);
++ }
++ if (!ret) wmb(); /* Complete WC segment writes before secure authentication. */
++ pr_info("SQ2_VENUS_FW phase=mdt_load_end ret=%d\n", ret);
++ return ret;
++}
++static int sq2_fw_auth(void *ctx)
++{
++ struct sq2_venus_fw *fw = ctx;
++ int ret;
++ if (fw->no_tz_base) {
++  pr_info("SQ2_NO_TZ cpu_start_begin NO_PAS\n");
++  msleep(100); /* Persist the boundary before the first unproven MMIO write. */
++  fw->cpu_touched = true;
++  ret = sq2_no_tz_start_cpu(fw->no_tz_base, 0x500000);
++  pr_info("SQ2_NO_TZ cpu_start_end ret=%d\n", ret);
++  return ret;
++ }
++ pr_info("SQ2_VENUS_FW phase=auth_begin\n");
++ ret = qcom_scm_pas_auth_and_reset(9);
++ pr_info("SQ2_VENUS_FW phase=auth_end ret=%d\n", ret);
++ return ret;
++}
++static int sq2_fw_pas_stop(void *ctx)
++{
++ struct sq2_venus_fw *fw = ctx;
++ int ret;
++ if (fw->no_tz_base) return sq2_fw_no_tz_stop(fw);
++ pr_info("SQ2_VENUS_FW phase=pas_shutdown_begin\n");
++ ret = qcom_scm_pas_shutdown(9);
++ pr_info("SQ2_VENUS_FW phase=pas_shutdown_end ret=%d\n", ret);
++ return ret;
++}
++static void sq2_fw_release(void *ctx)
++{
++ struct sq2_venus_fw *fw = ctx;
++ sq2_fw_drop_stream(fw);
++ memzero_explicit(fw->cpu, SQ2_FW_LIMIT);
++ wmb();
++ if (fw->pil_gap) sq2_fw_unmap_gap(fw);
++ else dma_free_coherent(&fw->pdev->dev, SQ2_FW_LIMIT, fw->cpu, fw->dma);
++ if (fw->pdev != sq2_pm_memory_device)
++  platform_device_unregister(fw->pdev);
++ fw->cpu = NULL;
++ fw->pdev = NULL;
++ module_put(THIS_MODULE);
++ pr_info("SQ2_VENUS_FW phase=memory_released\n");
++}
++static const struct sq2_fw_operations sq2_fw_ops = {
++ .alloc = sq2_fw_alloc, .load = sq2_fw_load, .start = sq2_fw_auth,
++ .stop = sq2_fw_pas_stop, .release = sq2_fw_release,
++};
++
++#ifdef SQ2_VENUS_SYSTEM_PM
++/* Bounded module-owned reference; this published backend is pinned to reboot. */
++static const struct firmware *sq2_system_pm_image;
++#endif
++int sq2_venus_fw_boot(struct device *dev, struct sq2_venus_fw **out, bool pil_gap,
++                     void __iomem *no_tz_base)
++{
++ struct sq2_venus_fw *fw;
++ bool supported;
++ int ret;
++ if (!out || *out || !of_machine_is_compatible("microsoft,surface-pro-x"))
++  return -EINVAL;
++ if (no_tz_base) {
++  if (!pil_gap || !is_kernel_in_hyp_mode() ||
++      !of_machine_is_compatible("qcom,sc8180x")) return -EPERM;
++  ret = sq2_no_tz_reset_held(no_tz_base);
++  if (ret) return ret;
++ } else {
++ if (!qcom_scm_is_available())
++  return -EPROBE_DEFER;
++ supported = qcom_scm_pas_supported(9);
++ pr_info("SQ2_VENUS_FW phase=support_query pas9=%d adsp1=%d cdsp18=%d mpss4=%d\n",
++         supported, qcom_scm_pas_supported(1), qcom_scm_pas_supported(18),
++         qcom_scm_pas_supported(4));
++ }
++ /* Advisory only: on this Surface all four queries report false although
++  * PAS-backed ADSP/CDSP/MPSS are running. Like stock Venus, rely on the real
++  * load/auth return values; never convert unsupported/error to success.
++  */
++ mutex_lock(&sq2_fw_lock);
++ if (sq2_fw_owner) {
++  ret = -EBUSY;
++  goto unlock;
++ }
++ fw = kzalloc(sizeof(*fw), GFP_KERNEL);
++ if (!fw) {
++  ret = -ENOMEM;
++  goto unlock;
++ }
++ fw->pil_gap = pil_gap;
++ fw->no_tz_base = no_tz_base;
++ fw->parent = dev;
++#ifdef SQ2_VENUS_SYSTEM_PM
++ if (no_tz_base) {
++  if (!sq2_system_pm_image) {
++   ret = request_firmware_direct(&sq2_system_pm_image, image_name, dev);
++   if (ret) goto free;
++   ret = sq2_fw_check_image(sq2_system_pm_image);
++   if (ret) {
++    release_firmware(sq2_system_pm_image); sq2_system_pm_image = NULL;
++    goto free;
++   }
++  }
++  fw->image = sq2_system_pm_image;
++ } else
++#endif
++ {
++  ret = request_firmware_direct(&fw->image, image_name, dev);
++  if (ret) goto free;
++ }
++ ret = sq2_fw_check_image(fw->image);
++ if (!ret)
++  ret = sq2_fw_start(&fw->tx, &sq2_fw_ops, fw);
++#ifdef SQ2_VENUS_SYSTEM_PM
++ if (!no_tz_base)
++#endif
++  release_firmware(fw->image);
++ fw->image = NULL;
++ if (fw->tx.state != SQ2_FW_EMPTY) {
++  sq2_fw_owner = fw;
++  *out = fw;
++  if (fw->tx.state == SQ2_FW_QUARANTINED)
++   pr_err("SQ2_VENUS_FW shutdown=%d; DMA memory/device/module pinned until reboot\n",
++          fw->tx.stop_error);
++  goto unlock;
++ }
++free:
++ kfree(fw);
++unlock:
++ mutex_unlock(&sq2_fw_lock);
++ return ret;
++}
++
++int sq2_venus_fw_shutdown(struct sq2_venus_fw **owner)
++{
++ struct sq2_venus_fw *fw;
++ int ret = 0;
++ if (!owner)
++  return -EINVAL;
++ mutex_lock(&sq2_fw_lock);
++ fw = *owner;
++ if (!fw)
++  goto unlock;
++ if (fw != sq2_fw_owner) {
++  ret = -EINVAL;
++  goto unlock;
++ }
++ ret = sq2_fw_stop(&fw->tx, &sq2_fw_ops, fw);
++ if (!ret) {
++  sq2_fw_owner = NULL;
++  *owner = NULL;
++  kfree(fw);
++ }
++unlock:
++ mutex_unlock(&sq2_fw_lock);
++ return ret;
++}
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-venus-fw.h b/drivers/media/platform/qcom/venus/sq2-venus-fw.h
+--- a/drivers/media/platform/qcom/venus/sq2-venus-fw.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-venus-fw.h	2026-11-20 21:12:16.415669756 +0100
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef SQ2_VENUS_FW_H
++#define SQ2_VENUS_FW_H
++struct device;
++struct sq2_venus_fw;
++/* Independent owner survives loss of a core/device pointer on failed probe.
++ * On failure *out can be non-NULL: allocation is quarantined until reboot.
++ * Does not handle HFI/IRQ/clock lifetime; callers must retain those separately.
++ */
++/* A non-NULL powered MMIO base explicitly selects the EL2 no-TZ lab candidate. */
++int sq2_venus_fw_boot(struct device *dev, struct sq2_venus_fw **out, bool pil_gap,
++                     void __iomem *no_tz_base);
++int sq2_venus_fw_shutdown(struct sq2_venus_fw **owner);
++int sq2_venus_fw_probe_gap(void);
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-venus-lifetime.h b/drivers/media/platform/qcom/venus/sq2-venus-lifetime.h
+--- a/drivers/media/platform/qcom/venus/sq2-venus-lifetime.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-venus-lifetime.h	2026-11-20 21:12:16.422360202 +0100
+@@ -0,0 +1,34 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef SQ2_VENUS_LIFETIME_H
++#define SQ2_VENUS_LIFETIME_H
++/* Shared policy used by the real resource owner and host fault tests. */
++struct sq2_venus_lifetime {
++ bool secure_touched, quarantined;
++ int stop_error;
++};
++static int sq2_venus_lifetime_begin(struct sq2_venus_lifetime *s)
++{
++ if (s->quarantined || s->secure_touched)
++  return -EBUSY;
++ s->secure_touched = true;
++ return 0;
++}
++static int sq2_venus_lifetime_end(struct sq2_venus_lifetime *s, int ret)
++{
++ if (s->quarantined)
++  return s->stop_error;
++ if (!s->secure_touched)
++  return -EINVAL;
++ if (ret) {
++  s->quarantined = true;
++  s->stop_error = ret;
++  return ret;
++ }
++ s->secure_touched = false;
++ return 0;
++}
++static bool sq2_venus_lifetime_releasable(const struct sq2_venus_lifetime *s)
++{
++ return !s->secure_touched && !s->quarantined;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-venus-no-tz.h b/drivers/media/platform/qcom/venus/sq2-venus-no-tz.h
+--- a/drivers/media/platform/qcom/venus/sq2-venus-no-tz.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-venus-no-tz.h	2026-11-20 21:12:16.428512339 +0100
+@@ -0,0 +1,57 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Fixed SC8180X candidate from QcSkExt8180 a090/b4f8/b930. Call only with
++ * power held and the checked firmware mapped at IOVA 0. Never read TZ ranges.
++ */
++#ifndef SQ2_VENUS_NO_TZ_H
++#define SQ2_VENUS_NO_TZ_H
++static int sq2_no_tz_reset_held(void __iomem *base)
++{
++ u32 value = readl(base + 0xe3000);
++ return value != ~0U && (value & BIT(4)) ? 0 : -EBUSY;
++}
++
++static int sq2_no_tz_stop_cpu(void __iomem *base)
++{
++ u32 value = readl(base + 0xe3000);
++ if (value == ~0U) return -EIO;
++ writel(value | BIT(4), base + 0xe3000);
++ udelay(1);
++ return sq2_no_tz_reset_held(base);
++}
++
++static int sq2_no_tz_start_cpu(void __iomem *base, u32 span)
++{
++ u32 value;
++ int ret;
++ if (span != 0x500000) return -EINVAL;
++ ret = sq2_no_tz_reset_held(base);
++ if (ret) return ret;
++ udelay(1);
++ /* Unlike the intermediate Windows PIL state, Linux no-TZ must give the
++  * firmware a usable final range before CTRL_INIT builds its own MMU table. */
++ writel(0, base + 0xe1028);
++ writel(span, base + 0xe102c);
++ writel(0, base + 0xe1020);
++ writel(span, base + 0xe1024);
++ writel(span, base + 0xe1030);
++ writel(span, base + 0xe1034);
++ writel(1, base + 0xe1084);
++ writel(3, base + 0xe3084);
++ writel(0x540, base + 0xe3050);
++ writel(0x10e, base + 0xe3054);
++ writel(0x2e, base + 0xe3058);
++ writel(0xed8, base + 0xe306c);
++ writel(0x3138, base + 0xe3070);
++ writel(0x640, base + 0xe3078);
++ writel(readl(base + 0xe3088) & ~1U, base + 0xe3088);
++ writel(readl(base + 0xe308c) & ~1U, base + 0xe308c);
++ writel(readl(base + 0xe304c) | 1U, base + 0xe304c);
++ writel(readl(base + 0xe2010) & ~BIT(4), base + 0xe2010);
++ writel(readl(base + 0xe2000) & ~BIT(4), base + 0xe2000);
++ value = readl(base + 0xe3000);
++ if (value == ~0U || !(value & BIT(4))) return -EIO;
++ writel(value & ~BIT(4), base + 0xe3000);
++ value = readl(base + 0xe3000);
++ return value == ~0U || (value & BIT(4)) ? -EIO : 0;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-venus-platform.c b/drivers/media/platform/qcom/venus/sq2-venus-platform.c
+--- a/drivers/media/platform/qcom/venus/sq2-venus-platform.c	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-venus-platform.c	2026-11-20 21:12:16.118350040 +0100
+@@ -0,0 +1,160 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Independent core/MMIO/IRQ owner. Not yet a runnable platform backend:
++ * power/reset/ICC and core.c probe/recovery/remove dispatch are still pending.
++ */
++#ifndef SQ2_VENUS_PLATFORM_HOST_TEST
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/io.h>
++#include <linux/ioport.h>
++#include <linux/interrupt.h>
++#include <linux/slab.h>
++#include "core.h"
++#include "hfi.h"
++#endif
++#include "sq2-venus-platform.h"
++#include "sq2-venus-lifetime.h"
++#include "sq2-venus-power.h"
++
++struct sq2_venus_platform {
++ struct venus_core core;
++ struct sq2_venus_lifetime lifetime;
++ struct sq2_venus_power *power;
++ resource_size_t start, size;
++ bool region, irq_requested, irq_enabled;
++};
++
++struct venus_core *sq2_venus_platform_core(struct sq2_venus_platform *owner)
++{
++ return owner ? &owner->core : NULL;
++}
++
++int sq2_venus_platform_alloc(struct platform_device *pdev,
++                            struct sq2_venus_platform **out)
++{
++ struct sq2_venus_platform *o;
++ struct resource *r;
++ int ret;
++ if (!out || *out)
++  return -EINVAL;
++ r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++ if (!r || !resource_size(r))
++  return -ENODEV;
++ o = kzalloc(sizeof(*o), GFP_KERNEL);
++ if (!o)
++  return -ENOMEM;
++ if (!try_module_get(THIS_MODULE)) {
++  kfree(o);
++  return -ENODEV;
++ }
++ o->core.dev = get_device(&pdev->dev);
++ o->core.sq2_platform = o;
++ o->start = r->start;
++ o->size = resource_size(r);
++ o->core.irq = platform_get_irq(pdev, 0);
++ if (o->core.irq < 0) { ret = o->core.irq; goto fail; }
++ if (!request_mem_region(o->start, o->size, "sq2-venus-owner")) {
++  ret = -EBUSY;
++  goto fail;
++ }
++ o->region = true;
++ o->core.base = ioremap(o->start, o->size);
++ if (!o->core.base) { ret = -ENOMEM; goto fail; }
++ /* No handler may run before callers have initialized locks and HFI. */
++ ret = request_threaded_irq(o->core.irq, hfi_isr, hfi_isr_thread,
++                            IRQF_TRIGGER_HIGH | IRQF_ONESHOT | IRQF_NO_AUTOEN,
++                            "sq2-venus-owner", &o->core);
++ if (ret)
++  goto fail;
++ o->irq_requested = true;
++ *out = o;
++ return 0;
++fail:
++ if (o->core.base) iounmap(o->core.base);
++ if (o->region) release_mem_region(o->start, o->size);
++ put_device(o->core.dev);
++ kfree(o);
++ module_put(THIS_MODULE);
++ return ret;
++}
++
++int sq2_venus_platform_irq(struct sq2_venus_platform *o, bool enable)
++{
++ if (!o || !o->irq_requested)
++  return -EINVAL;
++ if (enable && (o->lifetime.quarantined || !o->core.priv))
++  return -EBUSY;
++ if (enable == o->irq_enabled)
++  return 0;
++ if (enable) enable_irq(o->core.irq);
++ else disable_irq(o->core.irq); /* synchronizes the threaded handler too */
++ o->irq_enabled = enable;
++ return 0;
++}
++
++int sq2_venus_platform_secure_begin(struct sq2_venus_platform *o)
++{
++ if (!o || !sq2_venus_power_ready(o->power)) return -ENODEV;
++ return o ? sq2_venus_lifetime_begin(&o->lifetime) : -EINVAL;
++}
++
++int sq2_venus_platform_power_on(struct sq2_venus_platform *o)
++{
++ if (!o || !sq2_venus_lifetime_releasable(&o->lifetime)) return -EBUSY;
++ return sq2_venus_power_on(o->core.dev, o->core.base, &o->power);
++}
++
++int sq2_venus_platform_power_off(struct sq2_venus_platform *o)
++{
++ if (!o || !sq2_venus_lifetime_releasable(&o->lifetime) || o->core.sq2_fw_owner)
++  return -EBUSY;
++ sq2_venus_platform_irq(o, false);
++ return sq2_venus_power_off(&o->power, o->core.sq2_boot_attempted);
++}
++
++int sq2_venus_platform_secure_end(struct sq2_venus_platform *o, int pas_status)
++{
++ int ret;
++ if (!o) return -EINVAL;
++ ret = sq2_venus_lifetime_end(&o->lifetime, pas_status);
++ if (o->lifetime.quarantined) {
++  sq2_venus_platform_irq(o, false);
++  dev_err(o->core.dev, "SQ2 PAS stop=%d: core/MMIO/IRQ/device/module retained until reboot\n", ret);
++ }
++ return ret;
++}
++
++int sq2_venus_platform_release(struct sq2_venus_platform **owner)
++{
++ struct sq2_venus_platform *o;
++ if (!owner) return -EINVAL;
++ o = *owner;
++ if (!o) return 0;
++ if (!sq2_venus_lifetime_releasable(&o->lifetime) ||
++     o->core.priv || o->core.sq2_fw_owner || o->power)
++  return -EBUSY;
++ sq2_venus_platform_irq(o, false);
++ free_irq(o->core.irq, &o->core);
++ iounmap(o->core.base);
++ release_mem_region(o->start, o->size);
++ put_device(o->core.dev);
++ *owner = NULL;
++ kfree(o);
++ module_put(THIS_MODULE);
++ return 0;
++}
++
++#ifdef SQ2_VENUS_SYSTEM_PM
++int sq2_venus_platform_system_quiet(struct sq2_venus_platform *o)
++{
++ if (!o || !sq2_venus_lifetime_releasable(&o->lifetime) ||
++     o->core.sq2_fw_owner || o->core.sq2_secure_active) return -EBUSY;
++ return sq2_venus_power_system_quiet(o->power);
++}
++int sq2_venus_platform_system_restore(struct sq2_venus_platform *o)
++{
++ if (!o || !sq2_venus_lifetime_releasable(&o->lifetime) ||
++     o->core.sq2_fw_owner || o->core.sq2_secure_active) return -EBUSY;
++ return sq2_venus_power_system_restore(o->power);
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-venus-platform.h b/drivers/media/platform/qcom/venus/sq2-venus-platform.h
+--- a/drivers/media/platform/qcom/venus/sq2-venus-platform.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-venus-platform.h	2026-11-20 21:12:16.434786931 +0100
+@@ -0,0 +1,26 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef SQ2_VENUS_PLATFORM_H
++#define SQ2_VENUS_PLATFORM_H
++struct platform_device;
++struct venus_core;
++struct sq2_venus_platform;
++/* Explicit ownership, never devm. Caller serializes transitions. IRQ starts
++ * disabled, and may only be enabled after core/HFI initialization and power-on.
++ */
++int sq2_venus_platform_alloc(struct platform_device *pdev,
++                            struct sq2_venus_platform **out);
++struct venus_core *sq2_venus_platform_core(struct sq2_venus_platform *owner);
++int sq2_venus_platform_irq(struct sq2_venus_platform *owner, bool enable);
++int sq2_venus_platform_secure_begin(struct sq2_venus_platform *owner);
++int sq2_venus_platform_power_on(struct sq2_venus_platform *owner);
++int sq2_venus_platform_power_off(struct sq2_venus_platform *owner);
++int sq2_venus_platform_secure_end(struct sq2_venus_platform *owner, int pas_status);
++/* Release requires confirmed PAS stop AND prior HFI/firmware cleanup.
++ * Power/reset/ICC owner must also be released before this final operation.
++ */
++int sq2_venus_platform_release(struct sq2_venus_platform **owner);
++#ifdef SQ2_VENUS_SYSTEM_PM
++int sq2_venus_platform_system_quiet(struct sq2_venus_platform *owner);
++int sq2_venus_platform_system_restore(struct sq2_venus_platform *owner);
++#endif
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-venus-power.c b/drivers/media/platform/qcom/venus/sq2-venus-power.c
+--- a/drivers/media/platform/qcom/venus/sq2-venus-power.c	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-venus-power.c	2026-11-20 21:12:16.131382476 +0100
+@@ -0,0 +1,263 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Explicit power owner, ported from the verified private Iris1 sequence.
++ * No devm and no firmware calls. Caller must prove PAS stopped before off.
++ */
++#ifndef SQ2_VENUS_POWER_HOST_TEST
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/pm_domain.h>
++#include <linux/pm_runtime.h>
++#include <linux/clk.h>
++#include <linux/reset.h>
++#include <linux/delay.h>
++#include <linux/of_address.h>
++#include <linux/of_platform.h>
++#include <linux/regmap.h>
++#include <linux/interconnect.h>
++#include <linux/io.h>
++#endif
++#include "sq2-venus-power.h"
++struct sq2_venus_power {
++ struct device *dev, *pd[3];
++ struct clk *clk[7];
++ struct reset_control *rst[4];
++ struct icc_bulk_data icc[3];
++ int npd, nclk, nrst, powered, enabled, states[4];
++ bool voted, resets_changed, rate_changed, config_saved, ready;
++#ifdef SQ2_VENUS_SYSTEM_PM
++ bool system_quiet;
++#endif
++ unsigned long rate;
++ void __iomem *base;
++ u32 cgc, config, version;
++};
++static const char * const clocks[] = {"axic", "axi0", "axi1", "ahb", "core", "vcodec", "cvp"};
++static const char * const resets[] = {"axi", "core", "axi0", "axi1"};
++#ifndef SQ2_VENUS_POWER_HOST_TEST
++static int reset_status(struct device *dev, int index, struct reset_control *rst)
++{
++ static const u32 ids[] = {41, 0, 42, 43};
++ static const u32 regs[] = {0xb02c, 0x850, 0xb024, 0xb028};
++ struct of_phandle_args args;
++ struct platform_device *provider;
++ struct regmap *map;
++ struct resource res;
++ unsigned int value;
++ int ret = reset_control_status(rst);
++ if (ret != -ENOTSUPP)
++  return ret;
++ ret = of_parse_phandle_with_args(dev->of_node, "resets", "#reset-cells", index, &args);
++ if (ret)
++  return ret;
++ if (args.args_count != 1 || args.args[0] != ids[index] ||
++     !of_device_is_compatible(args.np, index == 1 ? "qcom,sm8150-videocc" : "qcom,gcc-sc8180x") ||
++     of_address_to_resource(args.np, 0, &res) ||
++     res.start != (index == 1 ? 0xab00000 : 0x100000) ||
++     resource_size(&res) < regs[index] + 4) {
++  of_node_put(args.np);
++  return -EINVAL;
++ }
++ provider = of_find_device_by_node(args.np);
++ of_node_put(args.np);
++ if (!provider)
++  return -EPROBE_DEFER;
++ map = dev_get_regmap(&provider->dev, NULL);
++ if (!provider->dev.driver || !map)
++  ret = -ENODEV;
++ else {
++  ret = regmap_read(map, regs[index], &value);
++  if (!ret) {
++   pr_info("SQ2_IRIS1_IDENTIFY phase=reset_status_regmap index=%d reg=%x raw=%08x\n",
++           index, regs[index], value);
++   ret = !!(value & BIT(2));
++  }
++ }
++ put_device(&provider->dev);
++ return ret;
++}
++
++#endif
++static int pulse(struct sq2_venus_power *p)
++{
++ int i, ret;
++ for (i=0;i<4;i++) {
++  ret=reset_control_assert(p->rst[i]);
++  if(ret) return ret;
++ }
++ usleep_range(150,250);
++ for(i=0;i<4;i++) {
++  ret=reset_control_deassert(p->rst[i]);
++  if(ret) return ret;
++ }
++ return 0;
++}
++bool sq2_venus_power_ready(struct sq2_venus_power *p)
++{
++ return p && p->ready;
++}
++int sq2_venus_power_on(struct device *dev, void __iomem *base, struct sq2_venus_power **out)
++{
++ struct sq2_venus_power *p;
++ int i,ret;
++ if (!out || *out || !base) return -EINVAL;
++ p=kzalloc(sizeof(*p),GFP_KERNEL);
++ if(!p) return -ENOMEM;
++ *out=p; p->dev=dev; p->base=base;
++ p->icc[0]=(struct icc_bulk_data){.name="cpu-cfg",.avg_bw=1000,.peak_bw=1000};
++ p->icc[1]=(struct icc_bulk_data){.name="video-mem",.peak_bw=304000};
++ p->icc[2]=(struct icc_bulk_data){.name="firmware-mem",.peak_bw=304000};
++ ret=of_icc_bulk_get(dev,3,p->icc);
++ if(ret) return ret;
++ p->voted=true;
++ for(i=0;i<3;i++) if(!p->icc[i].path) return -ENODEV;
++ ret=icc_bulk_set_bw(3,p->icc);
++ if(ret) return ret;
++ for(i=0;i<3;i++) {
++  p->pd[i]=dev_pm_domain_attach_by_id(dev,i);
++  if(IS_ERR_OR_NULL(p->pd[i])) return p->pd[i] ? PTR_ERR(p->pd[i]) : -ENODEV;
++  p->npd++;
++ }
++ for(i=0;i<7;i++) {
++  p->clk[i]=clk_get(dev,clocks[i]);
++  if(IS_ERR(p->clk[i])) return PTR_ERR(p->clk[i]);
++  p->nclk++;
++ }
++ for(i=0;i<4;i++) {
++  p->rst[i]=reset_control_get_exclusive(dev,resets[i]);
++  if(IS_ERR(p->rst[i])) return PTR_ERR(p->rst[i]);
++  p->nrst++;
++  ret=reset_status(dev,i,p->rst[i]);
++  if(ret<0) return ret;
++  p->states[i]=ret;
++ }
++ for(i=0;i<3;i++) {
++  ret=pm_runtime_resume_and_get(p->pd[i]);
++  if(ret<0) return ret;
++  p->powered++;
++ }
++ p->resets_changed=true;
++ ret=pulse(p);
++ if(ret) return ret;
++ for(i=0;i<7;i++) {
++  ret=clk_prepare_enable(p->clk[i]);
++  if(ret) return ret;
++  p->enabled++;
++ }
++ p->rate=clk_get_rate(p->clk[4]);
++ p->rate_changed=true;
++ ret=clk_set_rate(p->clk[4],200000000);
++ if(ret) return ret;
++ if(clk_get_rate(p->clk[4])<199999000 || clk_get_rate(p->clk[4])>200001000) return -ERANGE;
++ p->version=readl(base+0xe0000);
++ if(p->version!=0x5010002f) return -ENODEV;
++ p->cgc=readl(base+0xe2010); p->config=readl(base+0xe2000);
++ p->config_saved=true;
++ p->ready=true;
++ return 0;
++}
++int sq2_venus_power_off(struct sq2_venus_power **owner, bool firmware_attempted)
++{
++ struct sq2_venus_power *p;
++ int i,ret,first=0;
++ if(!owner) return -EINVAL;
++ p=*owner;
++ if(!p) return 0;
++ p->ready=false;
++ if(p->config_saved) {
++  writel(p->config,p->base+0xe2000); writel(p->cgc,p->base+0xe2010);
++  p->config_saved=false;
++ }
++ if(p->rate_changed) {
++  ret=clk_set_rate(p->clk[4],p->rate);
++  if(ret) return ret; /* keep powered references; do not free partial state */
++  p->rate_changed=false;
++ }
++ while(p->enabled) clk_disable_unprepare(p->clk[--p->enabled]);
++ if(firmware_attempted && p->resets_changed && (p->version & ~0xffffU)==0x50100000) {
++  ret=pulse(p);
++  if(ret) return ret;
++ }
++ if(p->resets_changed) {
++  for(i=0;i<4;i++) {
++   ret=p->states[i] ? reset_control_assert(p->rst[i]) : reset_control_deassert(p->rst[i]);
++   if(ret) return ret;
++  }
++  p->resets_changed=false;
++ }
++ while(p->powered) {
++  ret=pm_runtime_put_sync(p->pd[--p->powered]);
++  if(ret<0 && !first) first=ret;
++ }
++ while(p->nclk) clk_put(p->clk[--p->nclk]);
++ while(p->nrst) reset_control_put(p->rst[--p->nrst]);
++ while(p->npd) dev_pm_domain_detach(p->pd[--p->npd],false);
++ if(p->voted) {
++  for(i=2;i>=0;i--) {
++   ret=icc_set_bw(p->icc[i].path,0,0);
++   if(ret && !first) first=ret;
++  }
++  icc_bulk_put(3,p->icc);
++ }
++ kfree(p); *owner=NULL;
++ return first;
++}
++
++#ifdef SQ2_VENUS_SYSTEM_PM
++/* The genpd virtual devices/usage references stay owned. System noirq PM owns
++ * domain transitions; detaching/reattaching devices during the PM walk is not
++ * permitted here. Caller has already proven firmware/DMA stopped. */
++int sq2_venus_power_system_quiet(struct sq2_venus_power *p)
++{
++ int i, ret;
++ if (!p || p->powered != 3 || p->npd != 3 || p->nclk != 7 ||
++     p->nrst != 4 || !p->voted) return -EINVAL;
++ if (p->system_quiet) return 0;
++ p->ready = false;
++ if (p->config_saved) {
++  writel(p->config, p->base + 0xe2000);
++  writel(p->cgc, p->base + 0xe2010);
++  p->config_saved = false;
++ }
++ if (p->rate_changed) {
++  ret = clk_set_rate(p->clk[4], p->rate);
++  if (ret) return ret;
++  p->rate_changed = false;
++ }
++ while (p->enabled) clk_disable_unprepare(p->clk[--p->enabled]);
++ for (i = 2; i >= 0; i--) {
++  ret = icc_set_bw(p->icc[i].path, 0, 0);
++  if (ret) return ret;
++ }
++ p->system_quiet = true;
++ return 0;
++}
++int sq2_venus_power_system_restore(struct sq2_venus_power *p)
++{
++ int i, ret;
++ if (!p || !p->system_quiet || p->enabled || p->powered != 3 ||
++     p->npd != 3 || p->nclk != 7 || p->nrst != 4) return -EINVAL;
++ p->system_quiet = false;
++ ret = icc_bulk_set_bw(3, p->icc);
++ if (ret) return ret;
++ ret = pulse(p);
++ if (ret) return ret;
++ for (i = 0; i < 7; i++) {
++  ret = clk_prepare_enable(p->clk[i]);
++  if (ret) return ret;
++  p->enabled++;
++ }
++ p->rate = clk_get_rate(p->clk[4]);
++ p->rate_changed = true;
++ ret = clk_set_rate(p->clk[4], 200000000);
++ if (ret) return ret;
++ if (clk_get_rate(p->clk[4]) < 199999000 ||
++     clk_get_rate(p->clk[4]) > 200001000) return -ERANGE;
++ p->version = readl(p->base + 0xe0000);
++ if (p->version != 0x5010002f) return -ENODEV;
++ p->cgc = readl(p->base + 0xe2010);
++ p->config = readl(p->base + 0xe2000);
++ p->config_saved = true;
++ p->ready = true;
++ return 0;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-venus-power.h b/drivers/media/platform/qcom/venus/sq2-venus-power.h
+--- a/drivers/media/platform/qcom/venus/sq2-venus-power.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-venus-power.h	2026-11-20 21:12:16.443111939 +0100
+@@ -0,0 +1,14 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef SQ2_VENUS_POWER_H
++#define SQ2_VENUS_POWER_H
++struct device;
++struct sq2_venus_power;
++bool sq2_venus_power_ready(struct sq2_venus_power *owner);
++/* On error *out may remain owned; caller must run off before release. */
++int sq2_venus_power_on(struct device *dev, void __iomem *base, struct sq2_venus_power **out);
++int sq2_venus_power_off(struct sq2_venus_power **owner, bool firmware_attempted);
++#ifdef SQ2_VENUS_SYSTEM_PM
++int sq2_venus_power_system_quiet(struct sq2_venus_power *owner);
++int sq2_venus_power_system_restore(struct sq2_venus_power *owner);
++#endif
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-venus-retire.c b/drivers/media/platform/qcom/venus/sq2-venus-retire.c
+--- a/drivers/media/platform/qcom/venus/sq2-venus-retire.c	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-venus-retire.c	2026-11-20 21:12:16.143939055 +0100
+@@ -0,0 +1,150 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef SQ2_VENUS_RETIRE_HOST_TEST
++#include <linux/module.h>
++#include <linux/slab.h>
++#include "core.h"
++#endif
++#include "sq2-venus-retire.h"
++
++static void scope_put(struct sq2_venus_scope *scope)
++{
++ if (scope && refcount_dec_and_test(&scope->refs)) kfree(scope);
++}
++
++static void release_entry(struct sq2_venus_retired *entry)
++{
++ struct sq2_venus_scope *scope = entry->scope;
++ entry->release(entry);
++ scope_put(scope);
++}
++
++int sq2_venus_scope_begin(struct venus_inst *inst)
++{
++ struct venus_core *core = inst->core;
++ struct sq2_venus_scope *old, *scope = kzalloc(sizeof(*scope), GFP_KERNEL);
++ if (!scope) return -ENOMEM;
++ refcount_set(&scope->refs, 1);
++ mutex_lock(&core->sq2_retire_lock);
++ old = inst->sq2_scope;
++ if (core->sq2_dma_stopped || (old && !old->ended)) {
++  mutex_unlock(&core->sq2_retire_lock); kfree(scope); return -EIO;
++ }
++ inst->sq2_scope = scope;
++ mutex_unlock(&core->sq2_retire_lock);
++ scope_put(old);
++ return 0;
++}
++EXPORT_SYMBOL_GPL(sq2_venus_scope_begin);
++
++/* Binding happens before a buffer address is published to HFI. Active objects
++ * may survive END and be reused: only an ended old scope may be replaced. */
++int sq2_venus_scope_bind(struct venus_inst *inst, struct sq2_venus_retired *entry)
++{
++ struct venus_core *core = inst->core;
++ struct sq2_venus_scope *old, *scope;
++ mutex_lock(&core->sq2_retire_lock);
++ scope = inst->sq2_scope; old = entry->scope;
++ if (core->sq2_dma_stopped || !scope || scope->ended ||
++     (old && old != scope && !old->ended)) {
++  mutex_unlock(&core->sq2_retire_lock); return -EIO;
++ }
++ if (old != scope) { refcount_inc(&scope->refs); entry->scope = scope; }
++ mutex_unlock(&core->sq2_retire_lock);
++ if (old != scope) scope_put(old);
++ return 0;
++}
++EXPORT_SYMBOL_GPL(sq2_venus_scope_bind);
++
++bool sq2_venus_scope_ended(struct venus_inst *inst, struct sq2_venus_retired *entry)
++{
++ bool ended;
++ mutex_lock(&inst->core->sq2_retire_lock);
++ ended = entry->scope && entry->scope->ended;
++ mutex_unlock(&inst->core->sq2_retire_lock);
++ return ended;
++}
++EXPORT_SYMBOL_GPL(sq2_venus_scope_ended);
++
++void sq2_venus_scope_drop(struct venus_inst *inst)
++{
++ struct sq2_venus_scope *old;
++ mutex_lock(&inst->core->sq2_retire_lock);
++ old = inst->sq2_scope; inst->sq2_scope = NULL;
++ mutex_unlock(&inst->core->sq2_retire_lock);
++ scope_put(old);
++}
++EXPORT_SYMBOL_GPL(sq2_venus_scope_drop);
++
++void sq2_venus_scope_end(struct venus_inst *inst)
++{
++ struct venus_core *core = inst->core;
++ struct sq2_venus_retired *entry, *next;
++ LIST_HEAD(done);
++ mutex_lock(&core->sq2_retire_lock);
++ if (inst->sq2_scope) {
++  inst->sq2_scope->ended = true;
++  list_for_each_entry_safe(entry, next, &core->sq2_retired, list)
++   if (entry->scope == inst->sq2_scope) {
++    list_del_init(&entry->list); list_add_tail(&entry->list, &done);
++   }
++ }
++ mutex_unlock(&core->sq2_retire_lock);
++ list_for_each_entry_safe(entry, next, &done, list) {
++  list_del_init(&entry->list); release_entry(entry);
++ }
++}
++EXPORT_SYMBOL_GPL(sq2_venus_scope_end);
++
++void sq2_venus_retire_init(struct venus_core *core)
++{
++ INIT_LIST_HEAD(&core->sq2_retired);
++ mutex_init(&core->sq2_retire_lock);
++ core->sq2_dma_stopped = false;
++ core->sq2_vb2_bytes = 0;
++}
++
++int sq2_venus_vb2_reserve(struct venus_core *core, unsigned long bytes)
++{
++ int ret = 0;
++ mutex_lock(&core->sq2_retire_lock);
++ if (core->sq2_dma_stopped) ret = -EIO;
++ else if (!bytes || bytes > SQ2_VENUS_VB2_BUDGET ||
++          core->sq2_vb2_bytes > SQ2_VENUS_VB2_BUDGET - bytes) ret = -ENOSPC;
++ else core->sq2_vb2_bytes += bytes;
++ mutex_unlock(&core->sq2_retire_lock);
++ return ret;
++}
++EXPORT_SYMBOL_GPL(sq2_venus_vb2_reserve);
++
++void sq2_venus_vb2_unreserve(struct venus_core *core, unsigned long bytes)
++{
++ mutex_lock(&core->sq2_retire_lock);
++ if (!WARN_ON(bytes > core->sq2_vb2_bytes)) core->sq2_vb2_bytes -= bytes;
++ mutex_unlock(&core->sq2_retire_lock);
++}
++EXPORT_SYMBOL_GPL(sq2_venus_vb2_unreserve);
++
++void sq2_venus_retire(struct venus_core *core, struct sq2_venus_retired *entry)
++{
++ bool stopped;
++ mutex_lock(&core->sq2_retire_lock);
++ stopped = core->sq2_dma_stopped || (entry->scope && entry->scope->ended);
++ if (!stopped) list_add_tail(&entry->list, &core->sq2_retired);
++ mutex_unlock(&core->sq2_retire_lock);
++ if (stopped) release_entry(entry);
++}
++EXPORT_SYMBOL_GPL(sq2_venus_retire);
++
++void sq2_venus_retire_stopped(struct venus_core *core)
++{
++ LIST_HEAD(done);
++ struct sq2_venus_retired *entry, *next;
++ mutex_lock(&core->sq2_retire_lock);
++ core->sq2_dma_stopped = true;
++ list_splice_init(&core->sq2_retired, &done);
++ mutex_unlock(&core->sq2_retire_lock);
++ list_for_each_entry_safe(entry, next, &done, list) {
++  list_del_init(&entry->list);
++  release_entry(entry);
++ }
++}
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-venus-retire.h b/drivers/media/platform/qcom/venus/sq2-venus-retire.h
+--- a/drivers/media/platform/qcom/venus/sq2-venus-retire.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-venus-retire.h	2026-11-20 21:12:16.451914368 +0100
+@@ -0,0 +1,37 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef SQ2_VENUS_RETIRE_H
++#define SQ2_VENUS_RETIRE_H
++#ifndef SQ2_VENUS_RETIRE_HOST_TEST
++#include <linux/list.h>
++#include <linux/refcount.h>
++#endif
++struct venus_core;
++struct venus_inst;
++struct sq2_venus_retired;
++struct sq2_venus_scope {
++ refcount_t refs;
++ bool ended; /* protected by core retirement lock; never reset */
++};
++int sq2_venus_scope_begin(struct venus_inst *);
++int sq2_venus_scope_bind(struct venus_inst *, struct sq2_venus_retired *);
++bool sq2_venus_scope_ended(struct venus_inst *, struct sq2_venus_retired *);
++void sq2_venus_scope_end(struct venus_inst *);
++void sq2_venus_scope_drop(struct venus_inst *);
++/* Lab memory containment, not a firmware capability/maximum frame size. Counts
++ * live AND retired VB2, DPB and internal backing until actual release.
++ * The vb2-named API is retained for existing callers; the budget is shared. */
++#define SQ2_VENUS_VB2_BUDGET (1UL << 30)
++int sq2_venus_vb2_reserve(struct venus_core *, unsigned long bytes);
++void sq2_venus_vb2_unreserve(struct venus_core *, unsigned long bytes);
++struct sq2_venus_retired {
++ struct sq2_venus_scope *scope;
++ struct list_head list;
++ void (*release)(struct sq2_venus_retired *);
++};
++/* Caller must not hold core->lock. Entries own every object used by release,
++ * including the callback module. No reference to an expired vb2_buffer/inst. */
++void sq2_venus_retire(struct venus_core *, struct sq2_venus_retired *);
++void sq2_venus_retire_init(struct venus_core *);
++/* Only after IRQ synchronization and a successful PAS stop. */
++void sq2_venus_retire_stopped(struct venus_core *);
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/sq2-venus-system-pm.h b/drivers/media/platform/qcom/venus/sq2-venus-system-pm.h
+--- a/drivers/media/platform/qcom/venus/sq2-venus-system-pm.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2-venus-system-pm.h	2026-11-20 21:12:16.459243284 +0100
+@@ -0,0 +1,57 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Caller serializes transitions. A failed hardware transition is terminal;
++ * busy/live sessions do not consume a transition. No retry budget or timer. */
++#ifndef SQ2_VENUS_SYSTEM_PM_H
++#define SQ2_VENUS_SYSTEM_PM_H
++/* Positive callback result: no firmware/DMA transition occurred and IRQ
++ * delivery has been restored. Never use for a partial or failed stop. */
++#define SQ2_PM_STOP_UNCHANGED_BUSY 1
++enum sq2_system_pm_phase {
++ SQ2_PM_RUNNING, SQ2_PM_OFF, SQ2_PM_BROKEN, SQ2_PM_STOPPING, SQ2_PM_STARTING
++};
++struct sq2_system_pm {
++ enum sq2_system_pm_phase phase;
++ int error;
++ unsigned long stops, starts;
++};
++struct sq2_system_pm_ops {
++ int (*idle)(void *);
++ int (*stop)(void *);
++ int (*start)(void *);
++};
++static inline int sq2_system_pm_suspend(struct sq2_system_pm *s,
++ const struct sq2_system_pm_ops *ops, void *ctx)
++{
++ int ret;
++ if (s->phase == SQ2_PM_BROKEN) return s->error;
++ if (s->phase == SQ2_PM_OFF) return 0;
++ if (s->phase != SQ2_PM_RUNNING) return -EBUSY;
++ ret = ops->idle(ctx);
++ if (ret) return ret;
++ s->phase = SQ2_PM_STOPPING;
++ ret = ops->stop(ctx);
++ if (ret == SQ2_PM_STOP_UNCHANGED_BUSY) {
++  s->phase = SQ2_PM_RUNNING; return -EBUSY;
++ }
++ if (ret) {
++  s->error = ret; s->phase = SQ2_PM_BROKEN; return ret;
++ }
++ s->stops++; s->phase = SQ2_PM_OFF;
++ return 0;
++}
++static inline int sq2_system_pm_resume(struct sq2_system_pm *s,
++ const struct sq2_system_pm_ops *ops, void *ctx)
++{
++ int ret;
++ if (s->phase == SQ2_PM_BROKEN) return s->error;
++ if (s->phase == SQ2_PM_RUNNING) return 0;
++ if (s->phase != SQ2_PM_OFF) return -EBUSY;
++ s->phase = SQ2_PM_STARTING;
++ ret = ops->start(ctx);
++ if (ret) {
++  s->error = ret; s->phase = SQ2_PM_BROKEN; return ret;
++ }
++ s->starts++; s->phase = SQ2_PM_RUNNING;
++ return 0;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/sq2_video_fw_layout.h b/drivers/media/platform/qcom/venus/sq2_video_fw_layout.h
+--- a/drivers/media/platform/qcom/venus/sq2_video_fw_layout.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/sq2_video_fw_layout.h	2026-11-20 21:12:16.467752052 +0100
+@@ -0,0 +1,80 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* The 6.3 MDT loader assumes program headers immediately follow ELF32_Ehdr.
++ * Validate that assumption and every source/destination before calling it.
++ * This deliberately accepts only complete, relocatable ARM ELF32 images.
++ */
++#ifndef SQ2_VIDEO_FW_LAYOUT_H
++#define SQ2_VIDEO_FW_LAYOUT_H
++#ifdef __KERNEL__
++#include <linux/types.h>
++#else
++#include <stddef.h>
++#include <stdint.h>
++typedef uint32_t u32;
++typedef uint64_t u64;
++#endif
++
++#define SQ2_FW_LIMIT (6U * 1024 * 1024)
++#define SQ2_FW_MAX_SEGMENTS 32
++struct sq2_fw_segment { u32 source, address, filesz, memsz; };
++struct sq2_fw_layout {
++ u32 base, span, count;
++ struct sq2_fw_segment segments[SQ2_FW_MAX_SEGMENTS];
++};
++
++static u32 sq2_fw_u32(const unsigned char *p)
++{
++ return (u32)p[0] | (u32)p[1] << 8 | (u32)p[2] << 16 | (u32)p[3] << 24;
++}
++
++static int sq2_fw_layout(const unsigned char *b, size_t size,
++                        struct sq2_fw_layout *out)
++{
++ u32 i, j, count, base = 0xffffffffU;
++ u64 end = 0;
++
++ out->count = 0;
++ out->base = out->span = 0;
++ if (size < 52 || size > SQ2_FW_LIMIT || b[0] != 0x7f ||
++     b[1] != 'E' || b[2] != 'L' || b[3] != 'F' ||
++     b[4] != 1 || b[5] != 1 || b[6] != 1 ||
++     b[18] != 40 || b[19] || sq2_fw_u32(b + 20) != 1 ||
++     sq2_fw_u32(b + 28) != 52 || b[40] != 52 || b[41] ||
++     b[42] != 32 || b[43])
++  return -1;
++ count = (u32)b[44] | (u32)b[45] << 8;
++ if (!count || count > SQ2_FW_MAX_SEGMENTS || 52U + count * 32U > size)
++  return -1;
++ for (i = 0; i < count; i++) {
++  const unsigned char *p = b + 52 + i * 32;
++  u32 source = sq2_fw_u32(p + 4), addr = sq2_fw_u32(p + 12);
++  u32 fs = sq2_fw_u32(p + 16), ms = sq2_fw_u32(p + 20);
++  u32 flags = sq2_fw_u32(p + 24);
++  struct sq2_fw_segment *s;
++
++  if (sq2_fw_u32(p) != 1 || ((flags >> 24) & 7) == 2 || !ms)
++   continue;
++  if (!(flags & (1U << 27)) || fs > ms ||
++      (u64)source + fs > size || (u64)addr + ms > 0xffffffffULL)
++   return -1;
++  for (j = 0; j < out->count; j++) {
++   s = &out->segments[j];
++   if ((u64)addr < (u64)s->address + s->memsz &&
++       (u64)s->address < (u64)addr + ms)
++    return -1;
++  }
++  s = &out->segments[out->count++];
++  s->source = source; s->address = addr; s->filesz = fs; s->memsz = ms;
++  if (addr < base)
++   base = addr;
++  if ((u64)addr + ms > end)
++   end = (u64)addr + ms;
++ }
++ end = (end + 4095) & ~4095ULL;
++ if (!out->count || (base & 4095) || end <= base || end - base > SQ2_FW_LIMIT)
++  return -1;
++ out->base = base;
++ out->span = end - base;
++ return 0;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/vdec.c b/drivers/media/platform/qcom/venus/vdec.c
+--- a/drivers/media/platform/qcom/venus/vdec.c	2026-11-20 21:12:15.938247404 +0100
++++ b/drivers/media/platform/qcom/venus/vdec.c	2026-11-20 21:12:16.153540275 +0100
+@@ -16,10 +16,21 @@
+ 
+ #include "hfi_venus_io.h"
+ #include "hfi_parser.h"
++#include "venus-sq2-frame-sizes.h"
++#include "venus-sq2-crop.h"
++#include "venus-sq2-capture-layout.h"
+ #include "core.h"
+ #include "helpers.h"
+ #include "vdec.h"
+ #include "pm_helpers.h"
++#include "venus-sq2-vb2.h"
++#include "venus-sq2-callback.h"
++#include "venus-sq2-close-guard.h"
++#include "venus-sq2-omx.h"
++#include "venus-sq2-omx-flags.h"
++static unsigned int sq2_omx_config_flag = SQ2_V4L2_BUF_FLAG_CODECCONFIG;
++module_param(sq2_omx_config_flag, uint, 0444);
++MODULE_PARM_DESC(sq2_omx_config_flag, "Native V4L2 flag translated to HFI CODECCONFIG");
+ 
+ /*
+  * Three resons to keep MPLANE formats (despite that the number of planes
+@@ -135,6 +146,10 @@
+ 	    !venus_helper_check_format(inst, fmt[i].pixfmt))
+ 		return NULL;
+ 
++	if (fmt[i].pixfmt == V4L2_PIX_FMT_P010 &&
++	    (!IS_SQ2_HFI(inst->core) || inst->bit_depth != VIDC_BITDEPTH_10))
++		return NULL;
++
+ 	if (V4L2_TYPE_IS_CAPTURE(type) && fmt[i].pixfmt == V4L2_PIX_FMT_QC10C &&
+ 	    !(inst->bit_depth == VIDC_BITDEPTH_10))
+ 		return NULL;
+@@ -162,6 +177,9 @@
+ 			valid = venus_helper_check_codec(inst, fmt[i].pixfmt);
+ 		} else {
+ 			valid = venus_helper_check_format(inst, fmt[i].pixfmt);
++			if (fmt[i].pixfmt == V4L2_PIX_FMT_P010 &&
++			    (!IS_SQ2_HFI(inst->core) || inst->bit_depth != VIDC_BITDEPTH_10))
++				valid = false;
+ 
+ 			if (fmt[i].pixfmt == V4L2_PIX_FMT_QC10C &&
+ 			    !(inst->bit_depth == VIDC_BITDEPTH_10))
+@@ -237,13 +255,54 @@
+ 	return fmt;
+ }
+ 
++
++/* Called only after generic format normalization; orig retains requested padding. */
++static int sq2_capture_try(struct venus_inst *inst, struct v4l2_format *f,
++                          const struct v4l2_pix_format_mplane *orig)
++{
++ struct v4l2_pix_format_mplane *pix = &f->fmt.pix_mp;
++ u32 stride = orig->plane_fmt[0].bytesperline, size;
++ int ret;
++ if (f->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
++     !IS_SQ2_HFI(inst->core) ||
++     (stride <= pix->plane_fmt[0].bytesperline && orig->height <= inst->height))
++  return 0;
++ if (!inst->reconfig || inst->codec_state != VENUS_DEC_STATE_CAPTURE_SETUP ||
++     orig->width != inst->width || orig->pixelformat != inst->fmt_cap->pixfmt ||
++     orig->field != V4L2_FIELD_NONE)
++  return -EINVAL;
++ ret = sq2_capture_layout(orig->pixelformat, inst->width, inst->height,
++                         stride, orig->height,
++                         venus_helper_get_framesz(orig->pixelformat,
++                                                  inst->width, inst->height), &size);
++ if (ret)
++  return ret;
++ pix->height = orig->height;
++ pix->plane_fmt[0].bytesperline = stride;
++ pix->plane_fmt[0].sizeimage = size;
++ return 1;
++}
++
++static void sq2_capture_report(struct venus_inst *inst, struct v4l2_format *f)
++{
++ if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE && inst->sq2_capture_stride) {
++  f->fmt.pix_mp.height = inst->sq2_capture_scan;
++  f->fmt.pix_mp.plane_fmt[0].bytesperline = inst->sq2_capture_stride;
++  f->fmt.pix_mp.plane_fmt[0].sizeimage = inst->sq2_capture_size;
++ }
++}
++
+ static int vdec_try_fmt(struct file *file, void *fh, struct v4l2_format *f)
+ {
+ 	struct venus_inst *inst = to_inst(file);
+ 
++	struct v4l2_pix_format_mplane orig = f->fmt.pix_mp;
++	int ret;
++
+ 	vdec_try_fmt_common(inst, f);
++	ret = sq2_capture_try(inst, f, &orig);
+ 
+-	return 0;
++	return ret < 0 ? ret : 0;
+ }
+ 
+ static int vdec_check_src_change(struct venus_inst *inst)
+@@ -313,6 +372,7 @@
+ 	}
+ 
+ 	vdec_try_fmt_common(inst, f);
++	sq2_capture_report(inst, f);
+ 
+ 	return 0;
+ }
+@@ -325,6 +385,7 @@
+ 	const struct venus_format *fmt;
+ 	struct v4l2_format format;
+ 	u32 pixfmt_out = 0, pixfmt_cap = 0;
++	bool keep_crop;
+ 	struct vb2_queue *q;
+ 
+ 	q = v4l2_m2m_get_vq(inst->m2m_ctx, f->type);
+@@ -335,6 +396,20 @@
+ 	orig_pixmp = *pixmp;
+ 
+ 	fmt = vdec_try_fmt_common(inst, f);
++	{
++		int ret = sq2_capture_try(inst, f, &orig_pixmp);
++		if (ret < 0)
++			return ret;
++		if (ret) {
++			inst->sq2_capture_stride = pixmp->plane_fmt[0].bytesperline;
++			inst->sq2_capture_scan = pixmp->height;
++			inst->sq2_capture_size = pixmp->plane_fmt[0].sizeimage;
++			return 0;
++		}
++		inst->sq2_capture_stride = 0;
++		inst->sq2_capture_scan = 0;
++		inst->sq2_capture_size = 0;
++	}
+ 
+ 	if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+ 		pixfmt_out = pixmp->pixelformat;
+@@ -370,12 +445,16 @@
+ 	format.fmt.pix_mp.height = orig_pixmp.height;
+ 	vdec_try_fmt_common(inst, &format);
+ 
++	keep_crop = venus_sq2_keep_crop(inst, f->type,
++		format.fmt.pix_mp.width, format.fmt.pix_mp.height);
+ 	inst->width = format.fmt.pix_mp.width;
+ 	inst->height = format.fmt.pix_mp.height;
+-	inst->crop.top = 0;
+-	inst->crop.left = 0;
+-	inst->crop.width = inst->width;
+-	inst->crop.height = inst->height;
++	if (!keep_crop) {
++		inst->crop.top = 0;
++		inst->crop.left = 0;
++		inst->crop.width = inst->width;
++		inst->crop.height = inst->height;
++	}
+ 
+ 	if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+ 		inst->fmt_out = fmt;
+@@ -410,12 +489,18 @@
+ 		s->r.height = inst->out_height;
+ 		break;
+ 	case V4L2_SEL_TGT_COMPOSE_BOUNDS:
+-	case V4L2_SEL_TGT_COMPOSE_PADDED:
+ 		if (s->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+ 			return -EINVAL;
+ 		s->r.width = inst->width;
+ 		s->r.height = inst->height;
+ 		break;
++	case V4L2_SEL_TGT_COMPOSE_PADDED:
++		if (s->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
++			return -EINVAL;
++		s->r.width = inst->sq2_capture_stride ?
++			inst->sq2_capture_stride / (inst->fmt_cap->pixfmt == V4L2_PIX_FMT_P010 ? 2 : 1) : inst->width;
++		s->r.height = inst->sq2_capture_scan ? inst->sq2_capture_scan : inst->height;
++		break;
+ 	case V4L2_SEL_TGT_COMPOSE_DEFAULT:
+ 	case V4L2_SEL_TGT_COMPOSE:
+ 		if (s->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+@@ -507,6 +592,9 @@
+ 			return -EINVAL;
+ 	}
+ 
++	if (IS_SQ2_HFI(inst->core) && fmt->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
++		return venus_sq2_enum_sizes(inst->core, fsize);
++
+ 	if (fsize->index)
+ 		return -EINVAL;
+ 
+@@ -552,6 +640,9 @@
+ 	struct hfi_frame_data fdata = {0};
+ 	int ret;
+ 
++	if (cmd->cmd == 4)
++		return sq2_omx_flush(inst, cmd->flags);
++
+ 	ret = v4l2_m2m_ioctl_try_decoder_cmd(file, fh, cmd);
+ 	if (ret)
+ 		return ret;
+@@ -808,7 +899,30 @@
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = venus_helper_set_format_constraints(inst);
++	if (inst->sq2_capture_stride) {
++		struct hfi_uncompressed_plane_actual_constraints_info layout = {0};
++		u32 i;
++		if (inst->opb_fmt != HFI_COLOR_FORMAT_NV12 &&
++		    inst->opb_fmt != HFI_COLOR_FORMAT_P010)
++			return -EINVAL;
++		layout.buffer_type = inst->opb_buftype;
++		layout.num_planes = 2;
++		for (i = 0; i < 2; i++) {
++			layout.plane_format[i].stride_multiples = inst->sq2_capture_stride;
++			layout.plane_format[i].max_stride = inst->sq2_capture_stride;
++			layout.plane_format[i].min_plane_buffer_height_multiple =
++				inst->sq2_capture_scan >> i;
++			layout.plane_format[i].buffer_alignment = 256;
++		}
++		ret = hfi_session_set_property(inst,
++			HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO, &layout);
++		if (inst->opb_buftype == HFI_BUFFER_OUTPUT2)
++			inst->output2_buf_size = inst->sq2_capture_size;
++		else
++			inst->output_buf_size = inst->sq2_capture_size;
++	} else {
++		ret = venus_helper_set_format_constraints(inst);
++	}
+ 	if (ret)
+ 		return ret;
+ 
+@@ -842,8 +956,12 @@
+ 			if (ret)
+ 				return ret;
+ 
+-			if (bufreq.size > inst->output2_buf_size)
++			if (bufreq.size > inst->output2_buf_size) {
++				if (inst->sq2_capture_stride)
++					dev_warn_ratelimited(core->dev, "native capture firmware requires %u, allocation %u\n",
++						bufreq.size, inst->output2_buf_size);
+ 				return -EINVAL;
++			}
+ 		}
+ 
+ 		if (inst->output2_buf_size) {
+@@ -989,6 +1107,7 @@
+ 		sizes[0] = venus_helper_get_framesz(inst->fmt_cap->pixfmt,
+ 						    inst->width,
+ 						    inst->height);
++		sizes[0] = max(sizes[0], inst->sq2_capture_size);
+ 		inst->output_buf_size = sizes[0];
+ 		*num_buffers = max(*num_buffers, out_num);
+ 		inst->num_output_bufs = *num_buffers;
+@@ -1188,6 +1307,12 @@
+ 	int ret;
+ 
+ 	mutex_lock(&inst->lock);
++	if (IS_SQ2_HFI(inst->core) && (inst->session_error ||
++	    test_bit(0, &inst->core->sys_error))) {
++		ret = -EIO;
++		goto error;
++	}
++
+ 
+ 	if (q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+ 		ret = vdec_start_capture(inst);
+@@ -1282,9 +1407,19 @@
+ static void vdec_stop_streaming(struct vb2_queue *q)
+ {
+ 	struct venus_inst *inst = vb2_get_drv_priv(q);
+-	int ret = -EINVAL;
++	int ret;
+ 
+-	vdec_pm_get_put(inst);
++	ret = IS_SQ2_HFI(inst->core) && test_bit(0, &inst->core->sys_error) ?
++		-EIO : vdec_pm_get_put(inst);
++	if (ret < 0) {
++		venus_sq2_quarantine_unresolved(inst, ret, "stop-streaming-power");
++		sq2_callback_close_begin(inst);
++		mutex_lock(&inst->lock);
++		inst->session_error = true;
++		venus_helper_buffers_done(inst, q->type, VB2_BUF_STATE_ERROR);
++		mutex_unlock(&inst->lock);
++		return;
++	}
+ 
+ 	mutex_lock(&inst->lock);
+ 
+@@ -1295,7 +1430,10 @@
+ 
+ 	venus_helper_buffers_done(inst, q->type, VB2_BUF_STATE_ERROR);
+ 
+-	inst->session_error = 0;
++	if (IS_SQ2_HFI(inst->core)) {
++		if (ret || test_bit(0, &inst->core->sys_error))
++			inst->session_error = true;
++	} else inst->session_error = 0;
+ 
+ 	if (ret)
+ 		goto unlock;
+@@ -1312,28 +1450,43 @@
+ static void vdec_session_release(struct venus_inst *inst)
+ {
+ 	struct venus_core *core = inst->core;
+-	int ret, abort = 0;
++	int ret, power, abort = 0;
+ 
+-	vdec_pm_get(inst);
++	power = IS_SQ2_HFI(core) && test_bit(0, &core->sys_error) ?
++		-EIO : vdec_pm_get(inst);
++	if (power < 0)
++		venus_sq2_quarantine_unresolved(inst, power, "release-power");
+ 
+ 	mutex_lock(&inst->lock);
+ 	inst->codec_state = VENUS_DEC_STATE_DEINIT;
++	if (power < 0 || (IS_SQ2_HFI(core) && test_bit(0, &core->sys_error))) {
++		inst->session_error = true;
++		goto retire_only;
++	}
+ 
+ 	ret = hfi_session_stop(inst);
+-	abort = (ret && ret != -EINVAL) ? 1 : 0;
++	if (IS_SQ2_HFI(core)) abort |= (ret && ret != -EINVAL);
++	else abort = (ret && ret != -EINVAL) ? 1 : 0;
+ 	ret = hfi_session_unload_res(inst);
+-	abort = (ret && ret != -EINVAL) ? 1 : 0;
++	if (IS_SQ2_HFI(core)) abort |= (ret && ret != -EINVAL);
++	else abort = (ret && ret != -EINVAL) ? 1 : 0;
+ 	ret = venus_helper_unregister_bufs(inst);
+-	abort = (ret && ret != -EINVAL) ? 1 : 0;
++	if (IS_SQ2_HFI(core)) abort |= (ret && ret != -EINVAL);
++	else abort = (ret && ret != -EINVAL) ? 1 : 0;
+ 	ret = venus_helper_intbufs_free(inst);
+-	abort = (ret && ret != -EINVAL) ? 1 : 0;
++	if (IS_SQ2_HFI(core)) abort |= (ret && ret != -EINVAL);
++	else abort = (ret && ret != -EINVAL) ? 1 : 0;
+ 	ret = hfi_session_deinit(inst);
+-	abort = (ret && ret != -EINVAL) ? 1 : 0;
++	if (IS_SQ2_HFI(core)) {
++		if (venus_sq2_quarantine_unresolved(inst, ret ? ret : -EIO,
++						 "release-end"))
++			goto retire_only;
++	} else abort = (ret && ret != -EINVAL) ? 1 : 0;
+ 
+ 	if (inst->session_error || test_bit(0, &core->sys_error))
+ 		abort = 1;
+ 
+-	if (abort)
++	if (abort && !IS_SQ2_HFI(core))
+ 		hfi_session_abort(inst);
+ 
+ 	venus_helper_free_dpb_bufs(inst);
+@@ -1343,6 +1496,22 @@
+ 
+ 	venus_pm_release_core(inst);
+ 	vdec_pm_put(inst, false);
++	return;
++
++retire_only:
++	/* No HFI or provider operation after failed power acquisition. Retired
++	 * backing owns its scope/device; it does not retain this instance. */
++	mutex_unlock(&inst->lock);
++	/* REQBUFS(0), unlike close(), has no earlier callback barrier. DPB
++	 * completion walks the list without inst->lock. Drain before retiring;
++	 * never wait with inst->lock held (event callbacks acquire it). */
++	sq2_callback_close_begin(inst);
++	mutex_lock(&inst->lock);
++	venus_helper_sq2_retire_buffers(inst);
++	INIT_LIST_HEAD(&inst->registeredbufs);
++	mutex_unlock(&inst->lock);
++	if (power >= 0)
++		vdec_pm_put(inst, false);
+ }
+ 
+ static int vdec_buf_init(struct vb2_buffer *vb)
+@@ -1477,7 +1646,7 @@
+ static void vdec_event_change(struct venus_inst *inst,
+ 			      struct hfi_event_data *ev_data, bool sufficient)
+ {
+-	static const struct v4l2_event ev = {
++	struct v4l2_event ev = {
+ 		.type = V4L2_EVENT_SOURCE_CHANGE,
+ 		.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION };
+ 	struct device *dev = inst->core->dev_dec;
+@@ -1487,6 +1656,9 @@
+ 
+ 	format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+ 	format.fmt.pix_mp.pixelformat = inst->fmt_cap->pixfmt;
++	inst->sq2_capture_stride = 0;
++	inst->sq2_capture_scan = 0;
++	inst->sq2_capture_size = 0;
+ 	format.fmt.pix_mp.width = ev_data->width;
+ 	format.fmt.pix_mp.height = ev_data->height;
+ 
+@@ -1555,13 +1727,16 @@
+ 
+ 		inst->next_buf_last = true;
+ 
+-		ret = hfi_session_flush(inst, HFI_FLUSH_OUTPUT, false);
++		ret = IS_SQ2_HFI(inst->core) ? sq2_omx_flush_output(inst) :
++			hfi_session_flush(inst, HFI_FLUSH_OUTPUT, false);
+ 		if (ret)
+ 			dev_dbg(dev, VDBGH "flush output error %d\n", ret);
+ 	}
+ 
+ 	inst->next_buf_last = true;
+ 	inst->reconfig = true;
++	if (IS_SQ2_HFI(inst->core))
++		sq2_omx_sequence(&ev, ev_data);
+ 	v4l2_event_queue_fh(&inst->fh, &ev);
+ 	wake_up(&inst->reconf_wait);
+ 
+@@ -1652,7 +1827,8 @@
+ 	src_vq->io_modes = VB2_MMAP | VB2_DMABUF;
+ 	src_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
+ 	src_vq->ops = &vdec_vb2_ops;
+-	src_vq->mem_ops = &vb2_dma_contig_memops;
++	src_vq->mem_ops = IS_SQ2_HFI(inst->core) ?
++		&sq2_vb2_memops : &vb2_dma_contig_memops;
+ 	src_vq->drv_priv = inst;
+ 	src_vq->buf_struct_size = sizeof(struct venus_buffer);
+ 	src_vq->allow_zero_bytesused = 1;
+@@ -1667,7 +1843,8 @@
+ 	dst_vq->io_modes = VB2_MMAP | VB2_DMABUF;
+ 	dst_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
+ 	dst_vq->ops = &vdec_vb2_ops;
+-	dst_vq->mem_ops = &vb2_dma_contig_memops;
++	dst_vq->mem_ops = IS_SQ2_HFI(inst->core) ?
++		&sq2_vb2_memops : &vb2_dma_contig_memops;
+ 	dst_vq->drv_priv = inst;
+ 	dst_vq->buf_struct_size = sizeof(struct venus_buffer);
+ 	dst_vq->allow_zero_bytesused = 1;
+@@ -1758,15 +1935,44 @@
+ static int vdec_close(struct file *file)
+ {
+ 	struct venus_inst *inst = to_inst(file);
++	int ret, end = 0;
+ 
+-	vdec_pm_get(inst);
++	sq2_callback_close_begin(inst);
++	ret = IS_SQ2_HFI(inst->core) && test_bit(0, &inst->core->sys_error) ?
++		-EIO : vdec_pm_get(inst);
++	if (ret < 0)
++		venus_sq2_quarantine_unresolved(inst, ret, "close-power");
+ 	cancel_work_sync(&inst->delayed_process_work);
+-	venus_close_common(inst, file);
++
++	synchronize_irq(inst->core->irq);
++	v4l2_m2m_ctx_release(inst->m2m_ctx);
++	v4l2_m2m_release(inst->m2m_dev);
++	/* REQBUFS may initialize HFI without ever reaching STREAMON. VB2 then
++	 * skips stop_streaming; confirm END before dropping the live session.
++	 * Failed END keeps the existing scope/DMA retirement quarantine. */
++	if (IS_SQ2_HFI(inst->core)) {
++		if (ret >= 0 && !test_bit(0, &inst->core->sys_error))
++			end = hfi_session_deinit(inst);
++		else
++			end = ret < 0 ? ret : -EIO;
++		if (venus_sq2_quarantine_unresolved(inst, end ? end : -EIO,
++						 "close-end") && !end)
++			end = -EIO;
++	}
++	hfi_session_destroy(inst);
++	venus_helper_sq2_retire_buffers(inst);
+ 	ida_destroy(&inst->dpb_ids);
+-	vdec_pm_put(inst, false);
++	v4l2_fh_del(&inst->fh, file);
++	v4l2_fh_exit(&inst->fh);
++	v4l2_ctrl_handler_free(&inst->ctrl_handler);
++
++	mutex_destroy(&inst->lock);
++	mutex_destroy(&inst->ctx_q_lock);
++	if (ret >= 0)
++		vdec_pm_put(inst, false);
+ 
+ 	kfree(inst);
+-	return 0;
++	return ret < 0 ? ret : end;
+ }
+ 
+ static const struct v4l2_file_operations vdec_fops = {
+@@ -1888,3 +2094,5 @@
+ 
+ MODULE_DESCRIPTION("Qualcomm Venus video decoder driver");
+ MODULE_LICENSE("GPL v2");
++
++MODULE_IMPORT_NS("DMA_BUF");
+diff -ruN a/drivers/media/platform/qcom/venus/vdec_ctrls.c b/drivers/media/platform/qcom/venus/vdec_ctrls.c
+--- a/drivers/media/platform/qcom/venus/vdec_ctrls.c	2026-11-20 21:12:15.938440278 +0100
++++ b/drivers/media/platform/qcom/venus/vdec_ctrls.c	2026-11-20 21:12:16.162645219 +0100
+@@ -9,6 +9,7 @@
+ #include "core.h"
+ #include "helpers.h"
+ #include "vdec.h"
++#include "venus-sq2-min-output.h"
+ 
+ static int vdec_op_s_ctrl(struct v4l2_ctrl *ctrl)
+ {
+@@ -76,10 +77,13 @@
+ 	case V4L2_CID_MPEG_VIDEO_DECODER_MPEG4_DEBLOCK_FILTER:
+ 		ctrl->val = ctr->post_loop_deb_mode;
+ 		break;
++	case V4L2_CID_MIN_BUFFERS_FOR_OUTPUT:
++		return venus_sq2_min_output_ctrl(inst, ctrl);
+ 	case V4L2_CID_MIN_BUFFERS_FOR_CAPTURE:
+ 		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq);
+-		if (!ret)
+-			ctrl->val = hfi_bufreq_get_count_min(&bufreq, ver);
++		if (ret)
++			return ret;
++		ctrl->val = hfi_bufreq_get_count_min(&bufreq, ver);
+ 		break;
+ 	default:
+ 		return -EINVAL;
+@@ -118,6 +122,17 @@
+ 	if (ctrl)
+ 		ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE;
+ 
++ if (IS_SQ2_HFI(inst->core)) {
++  u64 mask; u32 level;
++  ret = venus_helper_sq2_avc_controls(inst->core, &mask, &level);
++  if (ret) { v4l2_ctrl_handler_free(&inst->ctrl_handler); return ret; }
++  ctrl = v4l2_ctrl_new_std_menu(&inst->ctrl_handler, &vdec_ctrl_ops,
++    V4L2_CID_MPEG_VIDEO_H264_PROFILE, fls64(mask)-1, ~mask, __ffs64(mask));
++  if (ctrl) ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE;
++  ctrl = v4l2_ctrl_new_std_menu(&inst->ctrl_handler, &vdec_ctrl_ops,
++    V4L2_CID_MPEG_VIDEO_H264_LEVEL, level, 0, V4L2_MPEG_VIDEO_H264_LEVEL_1_0);
++  if (ctrl) ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE;
++ } else {
+ 	ctrl = v4l2_ctrl_new_std_menu(&inst->ctrl_handler, &vdec_ctrl_ops,
+ 		V4L2_CID_MPEG_VIDEO_H264_PROFILE,
+ 		V4L2_MPEG_VIDEO_H264_PROFILE_MULTIVIEW_HIGH,
+@@ -138,6 +153,8 @@
+ 	if (ctrl)
+ 		ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE;
+ 
++ }
++
+ 	ctrl = v4l2_ctrl_new_std_menu(&inst->ctrl_handler, &vdec_ctrl_ops,
+ 				      V4L2_CID_MPEG_VIDEO_VP8_PROFILE,
+ 				      V4L2_MPEG_VIDEO_VP8_PROFILE_3,
+@@ -167,6 +184,11 @@
+ 	if (ctrl)
+ 		ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE;
+ 
++	ctrl = v4l2_ctrl_new_std(&inst->ctrl_handler, &vdec_ctrl_ops,
++		V4L2_CID_MIN_BUFFERS_FOR_OUTPUT, 0, INT_MAX, 1, 0);
++	if (ctrl)
++		ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE | V4L2_CTRL_FLAG_READ_ONLY;
++
+ 	v4l2_ctrl_new_std(&inst->ctrl_handler, &vdec_ctrl_ops,
+ 			  V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY,
+ 			  0, 16383, 1, 0);
+diff -ruN a/drivers/media/platform/qcom/venus/venus-iris1.h b/drivers/media/platform/qcom/venus/venus-iris1.h
+--- a/drivers/media/platform/qcom/venus/venus-iris1.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-iris1.h	2026-11-20 21:12:16.489895891 +0100
+@@ -0,0 +1,46 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Iris1/VPU5 register differences, using HFI 4xx messages.
++ * Reference: OnePlus SM8150 32f26bf3, venus_hfi.c/vidc_hfi_io.h.
++ * core.h and hfi_venus_io.h must precede this header.
++ */
++#ifndef SQ2_VENUS_IRIS1_H
++#define SQ2_VENUS_IRIS1_H
++
++/* Explicit SQ2 Windows-reference profile; never implied by HFI4 alone. */
++#define SQ2_VENUS_UC_BYTES 0x01000000U
++static inline int venus_sq2_uc_valid(unsigned long long addr, u32 size)
++{
++ return size == SQ2_VENUS_UC_BYTES && addr >= 0x25800000ULL &&
++        addr <= 0xc0000000ULL - size;
++}
++
++static inline void venus_sq2_cpu_map(struct venus_core *core, u32 addr,
++                                    u32 sfr)
++{
++ writel(addr, core->cpu_cs_base + 0x64);
++ writel(SQ2_VENUS_UC_BYTES, core->cpu_cs_base + 0x68);
++ writel(addr, core->cpu_cs_base + 0x54);
++ writel(1, core->cpu_cs_base + 0x50);
++ writel(sfr, core->cpu_cs_base + 0x5c);
++ writel(0, core->cpu_cs_base + 0x60);
++}
++
++static inline void venus_iris1_clock_config(struct venus_core *core)
++{
++ writel(0, core->wrapper_base + WRAPPER_CPU_CGC_DIS);
++ writel(0, core->wrapper_base + WRAPPER_CPU_CLOCK_CONFIG);
++}
++
++static inline void venus_iris1_dsp_map(struct venus_core *core, u32 addr, u32 size)
++{
++ /* No CVP domain: the downstream VPU5 path mirrors the CPU interface queues. */
++ writel(addr, core->cpu_cs_base + 0x34); /* VMIMSG: DSP QTBL */
++ writel(addr, core->cpu_cs_base + 0x38); /* VMIMSGAG0: DSP UC address */
++ writel(size, core->cpu_cs_base + 0x3c); /* VMIMSGAG1: DSP UC size */
++}
++
++static inline u32 venus_iris1_irq_mask(u32 mask)
++{
++ return mask & ~(WRAPPER_INTR_MASK_A2HWD_BASK | WRAPPER_INTR_MASK_A2HCPU_MASK);
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-avc-export.h b/drivers/media/platform/qcom/venus/venus-sq2-avc-export.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-avc-export.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-avc-export.h	2026-11-20 21:12:16.497405389 +0100
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Bounded read-only copies of the actual firmware decoder tables. */
++static int sq2_avc_caps_get(char *buf, const struct kernel_param *kp)
++{
++ struct venus_core *core = READ_ONCE(sq2_pm_status_core);
++ const struct hfi_plat_caps *c;
++ unsigned int i;
++ int n = 0;
++ u32 codec = kp->arg ? *(const u32 *)kp->arg : HFI_VIDEO_CODEC_H264;
++ if (!core) return -ENODATA;
++ mutex_lock(&core->pm_lock);
++ mutex_lock(&core->lock);
++ if (core->state != CORE_INIT || test_bit(0, &core->sys_error)) { n = -EIO; goto done; }
++ c = venus_caps_by_codec(core, codec, VIDC_SESSION_TYPE_DEC);
++ if (!c || !c->num_pl || !c->num_caps) { n = -ENODATA; goto done; }
++ #define EMIT(...) do { int k = snprintf(buf+n, PAGE_SIZE-n, __VA_ARGS__); \
++  if (k < 0 || k >= PAGE_SIZE-n) { n = -EOVERFLOW; goto done; } n += k; } while (0)
++ EMIT("version=1\nsessions=%u\n", core->max_sessions_supported);
++ for (i=0; i<c->num_caps; i++)
++  EMIT("cap=%u,%u,%u,%u\n", c->caps[i].capability_type,c->caps[i].min,c->caps[i].max,c->caps[i].step_size);
++ for (i=0; i<c->num_pl; i++) EMIT("pl=%u,%u\n",c->pl[i].profile,c->pl[i].level);
++ for (i=0; i<c->num_fmts; i++) EMIT("fmt=%u,%u\n",c->fmts[i].buftype,c->fmts[i].fmt);
++ EMIT("end=1\n");
++ #undef EMIT
++done:
++ mutex_unlock(&core->lock);
++ mutex_unlock(&core->pm_lock);
++ return n;
++}
++static const struct kernel_param_ops sq2_avc_caps_ops = {.get=sq2_avc_caps_get};
++module_param_cb(sq2_avc_caps, &sq2_avc_caps_ops, NULL, 0444);
++
++/* Keep the original AVC ABI while exposing each codec independently. */
++#define SQ2_CAPS_PARAM(name, codec) \
++ static const u32 name##_codec = codec; \
++ module_param_cb(name, &sq2_avc_caps_ops, (void *)&name##_codec, 0444)
++SQ2_CAPS_PARAM(sq2_hevc_caps, HFI_VIDEO_CODEC_HEVC);
++SQ2_CAPS_PARAM(sq2_vp8_caps, HFI_VIDEO_CODEC_VP8);
++SQ2_CAPS_PARAM(sq2_vp9_caps, HFI_VIDEO_CODEC_VP9);
++SQ2_CAPS_PARAM(sq2_mpeg2_caps, HFI_VIDEO_CODEC_MPEG2);
++SQ2_CAPS_PARAM(sq2_mpeg1_caps, HFI_VIDEO_CODEC_MPEG1);
++#undef SQ2_CAPS_PARAM
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-callback.h b/drivers/media/platform/qcom/venus/venus-sq2-callback.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-callback.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-callback.h	2026-11-20 21:12:16.503775871 +0100
+@@ -0,0 +1,47 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef VENUS_SQ2_CALLBACK_H
++#define VENUS_SQ2_CALLBACK_H
++#ifndef SQ2_CALLBACK_HOST_TEST
++#include "hfi_msgs.h"
++#endif
++/* Called under core->lock, while the instance is still on core->instances. */
++static inline bool sq2_callback_get(struct venus_inst *inst, u32 packet)
++{
++ if (!IS_SQ2_HFI(inst->core)) return true;
++ if (inst->sq2_closing &&
++     (packet == HFI_MSG_SESSION_EMPTY_BUFFER ||
++      packet == HFI_MSG_SESSION_FILL_BUFFER || packet == HFI_MSG_EVENT_NOTIFY))
++  return false;
++ atomic_inc(&inst->sq2_callbacks);
++ return true;
++}
++
++static inline void sq2_callback_put(struct venus_inst *inst)
++{
++ struct venus_core *core;
++ if (!inst || !IS_SQ2_HFI(inst->core)) return;
++ core = inst->core;
++ /* Cache core before dropping the last instance reference. A waiter can free
++  * inst immediately at zero; never use an instance-owned waitqueue here. */
++ if (atomic_dec_and_test(&inst->sq2_callbacks))
++  wake_up_all(&core->sys_err_done);
++}
++
++static inline void sq2_callback_drain(struct venus_inst *inst)
++{
++ if (IS_SQ2_HFI(inst->core))
++  wait_event(inst->core->sys_err_done, !atomic_read(&inst->sq2_callbacks));
++}
++
++static inline void sq2_callback_close_begin(struct venus_inst *inst)
++{
++ struct venus_core *core = inst->core;
++ if (!IS_SQ2_HFI(core)) return;
++ mutex_lock(&core->lock);
++ WRITE_ONCE(inst->sq2_closing, true);
++ mutex_unlock(&core->lock);
++ /* No core/instance lock held while IRQ callbacks finish. Control replies
++  * remain enabled so STOP/FLUSH/RELEASE waits during VB2 teardown can finish. */
++ sq2_callback_drain(inst);
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-capabilities.h b/drivers/media/platform/qcom/venus/venus-sq2-capabilities.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-capabilities.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-capabilities.h	2026-11-20 21:12:16.509508247 +0100
+@@ -0,0 +1,85 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef VENUS_SQ2_CAPABILITIES_H
++#define VENUS_SQ2_CAPABILITIES_H
++#include <linux/slab.h>
++#include "sq2-hfi-properties.h"
++/* Included after core.h/hfi_helper.h. No changes to other Venus platforms. */
++struct sq2_caps_transaction {
++ struct hfi_plat_caps caps[MAX_CODEC_NUM];
++ u32 count, dec, enc, sessions, codecs, domains;
++ bool declared;
++};
++static int sq2_caps_property(void *context,u32 id,const u32 *p,u32 words)
++{
++ struct sq2_caps_transaction *t=context;
++ u32 i,j,n,at;
++ (void)words; /* Walker has validated every source span. */
++ if(id==0x1009){
++  if(t->declared||!p[0])return -1;
++  t->declared=true;t->dec=p[0];t->enc=p[1];
++  for(i=1;i<=2;i++)for(j=0;j<32;j++){
++   u32 bit=1U<<j,mask=i==1?t->enc:t->dec;
++   struct hfi_plat_caps *c;
++   if(!(mask&bit))continue;
++   if(t->count>=MAX_CODEC_NUM)return -1;
++   c=&t->caps[t->count++];c->codec=bit;c->domain=i;
++  }
++  return 0;
++ }
++ if(id==0x1010){if(!p[0]||p[0]>MAX_SESSIONS)return -1;t->sessions=p[0];return 0;}
++ if(id==0x100a||id==0x1016)return 0;
++ if(!t->declared)return -1;
++ if(id==0x100e){
++  if(!p[0]||!p[1]||(p[1]&~3U)|| (p[0]&~(t->dec|t->enc)))return -1;
++  t->codecs=p[0];t->domains=p[1];return 0;
++ }
++ if(!t->codecs||!t->domains)return -1;
++ for(i=0;i<t->count;i++){
++  struct hfi_plat_caps *c=&t->caps[i];
++  if(!(c->codec&t->codecs)||!(c->domain&t->domains))continue;
++  switch(id){
++  case 0x1007:
++   n=p[0];if(n>MAX_CAP_ENTRIES-c->num_caps)return -1;
++   for(j=0;j<n;j++){
++    const u32 *v=p+1+j*4;
++    if(v[1]>v[2]||!v[3])return -1;
++   }
++   memcpy(c->caps+c->num_caps,p+1,n*sizeof(c->caps[0]));c->num_caps+=n;break;
++  case 0x1006:
++   n=p[0];if(n>HFI_MAX_PROFILE_COUNT-c->num_pl)return -1;
++   memcpy(c->pl+c->num_pl,p+1,n*sizeof(c->pl[0]));c->num_pl+=n;break;
++  case 0x1004:
++   n=p[1];if(n>MAX_FMT_ENTRIES-c->num_fmts)return -1;
++   at=2;
++   for(j=0;j<n;j++){
++    c->fmts[c->num_fmts].buftype=p[0];c->fmts[c->num_fmts++].fmt=p[at];
++    at+=2+4*p[at+1];
++   }
++   break;
++  case 0x20100b:
++   if(p[1]>MAX_ALLOC_MODE_ENTRIES)return -1;
++   if(p[0]==HFI_BUFFER_OUTPUT||p[0]==HFI_BUFFER_OUTPUT2)
++    for(j=0;j<p[1];j++)if(p[j+2]==HFI_BUFFER_MODE_DYNAMIC)c->cap_bufs_mode_dynamic=true;
++   break;
++  default:return -1;
++  }
++ }
++ return 0;
++}
++static u32 venus_sq2_parse_capabilities(struct venus_core *core,const void *body,u32 size,u32 expected)
++{
++ struct sq2_caps_transaction *t;
++ u32 records=0,result=HFI_ERR_SYS_INSUFFICIENT_RESOURCES;
++ if(!size||size%4||!expected)return result;
++ t=kzalloc(sizeof(*t),GFP_KERNEL);if(!t)return result;
++ if(sq2_hfi_properties(body,size/4,sq2_caps_property,t,&records)||records!=expected||!t->declared||!t->count)
++  goto done;
++ /* Publish only a complete, validated table. Retain no pointers into packet. */
++ memcpy(core->caps,t->caps,sizeof(t->caps));
++ core->codecs_count=t->count;core->dec_codecs=t->dec;core->enc_codecs=t->enc;
++ core->max_sessions_supported=t->sessions?t->sessions:MAX_SESSIONS;
++ result=HFI_ERR_NONE;
++done:
++ kfree(t);return result;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-capture-layout.h b/drivers/media/platform/qcom/venus/venus-sq2-capture-layout.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-capture-layout.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-capture-layout.h	2026-11-20 21:12:16.515304376 +0100
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef VENUS_SQ2_CAPTURE_LAYOUT_H
++#define VENUS_SQ2_CAPTURE_LAYOUT_H
++/* Keep coded dimensions/crop separate from the client's linear allocation.
++ * Constraints describe real firmware output; metadata alone cannot change it.
++ */
++static int sq2_capture_layout(u32 format, u32 width, u32 height,
++                             u32 stride, u32 scan, u32 minimum, u32 *size)
++{
++ u32 bpp;
++ if (format != V4L2_PIX_FMT_NV12 && format != V4L2_PIX_FMT_P010)
++  return -EINVAL;
++ bpp = format == V4L2_PIX_FMT_P010 ? 2 : 1;
++ if (!width || !height || width > 8192 || height > 8192 ||
++     stride < width * bpp || stride > 16384 || stride % 128 ||
++     scan < height || scan > 8192 || scan % 32)
++  return -EINVAL;
++ *size = max(minimum, ALIGN(stride * scan * 3 / 2, 4096));
++ return 0;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-close-guard.h b/drivers/media/platform/qcom/venus/venus-sq2-close-guard.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-close-guard.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-close-guard.h	2026-11-20 21:12:16.522971904 +0100
+@@ -0,0 +1,34 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef VENUS_SQ2_CLOSE_GUARD_H
++#define VENUS_SQ2_CLOSE_GUARD_H
++/* INST_UNINIT is not proof of no firmware session: an INIT reply may time out
++ * after the firmware accepted it. Scope ownership is the authoritative fact. */
++static bool venus_sq2_session_unresolved(struct venus_inst *inst)
++{
++ struct venus_core *core = inst->core;
++ bool unresolved;
++ if (!IS_SQ2_HFI(core)) return false;
++ mutex_lock(&core->sq2_retire_lock);
++ unresolved = inst->sq2_scope && !inst->sq2_scope->ended;
++ mutex_unlock(&core->sq2_retire_lock);
++ return unresolved || (inst->sq2_end_sent && !inst->sq2_end_confirmed);
++}
++
++/* Before an unresolved instance can be unlinked/freed, prohibit new firmware
++ * session IDs (hash32_ptr) from reusing its address. Do not fabricate END, clear
++ * the error, retry PAS, or schedule recovery. DMA stays in existing retirement
++ * until a separately verified complete stop/reboot. Never-init closes are safe. */
++static bool venus_sq2_quarantine_unresolved(struct venus_inst *inst,
++                                           int error, const char *stage)
++{
++ struct venus_core *core = inst->core;
++ if (!venus_sq2_session_unresolved(inst)) return false;
++ mutex_lock(&core->lock);
++ set_bit(0, &core->sys_error);
++ mutex_unlock(&core->lock);
++ inst->session_error = true;
++ dev_err(core->dev, "SQ2 session quarantine stage=%s error=%d; END unconfirmed, admission closed\n",
++         stage, error);
++ return true;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-core.h b/drivers/media/platform/qcom/venus/venus-sq2-core.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-core.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-core.h	2026-11-20 21:12:16.531866264 +0100
+@@ -0,0 +1,132 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Included in core.c after its register-offset and capability helpers.
++ * Experimental, explicit opt-in. No resource match is added by this file.
++ * Published V4L2 cores remain allocated until reboot on remove: open file and
++ * queued buffer lifetime must not be guessed from an instantaneous list count.
++ */
++#ifndef VENUS_SQ2_CORE_H
++#define VENUS_SQ2_CORE_H
++#include "sq2-venus-platform.h"
++#include "sq2-venus-retire.h"
++static bool sq2_platform_allow;
++module_param(sq2_platform_allow, bool, 0600);
++static const struct venus_pm_ops sq2_resident_pm_ops = {0};
++
++static int venus_sq2_stop_core(struct venus_core *core)
++{
++ int ret;
++ sq2_venus_platform_irq(core->sq2_platform, false);
++ mutex_lock(&core->lock);
++ set_bit(0, &core->sys_error);
++ if (core->priv) core->ops->core_deinit(core);
++ core->state = CORE_UNINIT;
++ ret = venus_shutdown(core);
++ mutex_unlock(&core->lock);
++ if (ret) return ret; /* firmware, HFI and powered platform remain owned */
++ sq2_venus_retire_stopped(core);
++ return sq2_venus_platform_power_off(core->sq2_platform);
++}
++
++static void venus_sq2_error(struct work_struct *work)
++{
++ struct venus_core *core = container_of(work, struct venus_core, work.work);
++ int ret = venus_sq2_stop_core(core);
++ dev_err(core->dev, "SQ2 terminal firmware error, stop=%d; no automatic firmware restart\n", ret);
++ /* No stock coredump, hfi_reinit, second PAS start or scheduled retry. */
++}
++
++static int venus_sq2_remove(struct platform_device *pdev)
++{
++ struct venus_core *core = platform_get_drvdata(pdev);
++ int ret;
++ cancel_delayed_work_sync(&core->work);
++ ret = venus_sq2_stop_core(core);
++ if (core->sq2_children) {
++  of_platform_depopulate(core->dev);
++  core->sq2_children = false;
++ }
++ if (core->sq2_pm_enabled) {
++  pm_runtime_disable(core->dev);
++  core->sq2_pm_enabled = false;
++ }
++ /* A published core may still be referenced by open V4L2 files. Keep core,
++  * v4l2_device, HFI queues and module pin even after confirmed PAS stop.
++  * This is bounded lab quarantine, not completed hot-unplug support. */
++ dev_warn(core->dev, "SQ2 removed, stop=%d; published owner retained until reboot\n", ret);
++ return ret;
++}
++
++static int venus_sq2_probe(struct platform_device *pdev,
++                           const struct venus_resources *res)
++{
++ struct sq2_venus_platform *owner = NULL;
++ struct venus_core *core;
++ int ret, stop;
++ if (!sq2_platform_allow) return -EOPNOTSUPP;
++ if (!res->iris1 || res->hfi_version != HFI_VERSION_4XX) return -EINVAL;
++ ret = sq2_venus_platform_alloc(pdev, &owner);
++ if (ret) return ret;
++ core = sq2_venus_platform_core(owner);
++ core->res = res;
++ core->use_tz = true;
++ core->pm_ops = &sq2_resident_pm_ops;
++ mutex_init(&core->lock);
++ mutex_init(&core->pm_lock);
++ sq2_venus_retire_init(core);
++ INIT_LIST_HEAD(&core->instances);
++ INIT_DELAYED_WORK(&core->work, venus_sq2_error);
++ init_waitqueue_head(&core->sys_err_done);
++ platform_set_drvdata(pdev, core);
++ venus_assign_register_offsets(core);
++ ret = sq2_venus_platform_power_on(owner);
++ if (ret) goto fail;
++ ret = hfi_create(core, &venus_core_ops);
++ if (ret) goto fail;
++ ret = venus_boot(core);
++ if (ret) goto fail;
++ ret = hfi_core_resume(core, true);
++ if (ret) goto fail;
++ ret = sq2_venus_platform_irq(owner, true);
++ if (ret) goto fail;
++ ret = hfi_core_init(core);
++ if (ret) goto fail;
++ ret = venus_enumerate_codecs(core, VIDC_SESSION_TYPE_DEC);
++ if (ret) goto fail;
++ ret = v4l2_device_register(core->dev, &core->v4l2_dev);
++ if (ret) goto fail;
++ core->sq2_public = true;
++ /* Keep firmware/power resident. Child PM callbacks are intentionally empty
++  * while the real parent owner holds all seven clocks and three domains. */
++ ret = pm_runtime_set_active(core->dev);
++ if (ret) goto fail;
++ pm_runtime_enable(core->dev);
++ core->sq2_pm_enabled = true;
++ core->sq2_children = true; /* also depopulate partial population on error */
++ ret = of_platform_populate(core->dev->of_node, NULL, NULL, core->dev);
++ if (ret) goto fail;
++ venus_sq2_pm_publish(core);
++ return 0;
++fail:
++ cancel_delayed_work_sync(&core->work);
++ stop = venus_sq2_stop_core(core);
++ if (stop || core->sq2_public) {
++  if (core->sq2_children) {
++   of_platform_depopulate(core->dev);
++   core->sq2_children = false;
++  }
++  if (core->sq2_pm_enabled) {
++   pm_runtime_disable(core->dev);
++   core->sq2_pm_enabled = false;
++  }
++  dev_err(core->dev, "SQ2 probe=%d stop=%d; independent owner retained\n", ret, stop);
++  return ret;
++ }
++ if (core->priv) hfi_destroy(core);
++ platform_set_drvdata(pdev, NULL);
++ mutex_destroy(&core->pm_lock);
++ mutex_destroy(&core->lock);
++ stop = sq2_venus_platform_release(&owner);
++ if (stop) dev_err(&pdev->dev, "SQ2 release=%d; retained\n", stop);
++ return ret;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-crop.h b/drivers/media/platform/qcom/venus/venus-sq2-crop.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-crop.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-crop.h	2026-11-20 21:12:16.539428004 +0100
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef VENUS_SQ2_CROP_H
++#define VENUS_SQ2_CROP_H
++/* A capture format switch after SOURCE_CHANGE must not replace the firmware's
++ * visible rectangle with the allocation's aligned dimensions. No scaling or
++ * guessed crop: preserve only an existing, bounded rectangle at identical size.
++ */
++static bool venus_sq2_keep_crop(struct venus_inst *inst, u32 type,
++                              u32 width, u32 height)
++{
++ const struct v4l2_rect *r = &inst->crop;
++ if (!IS_SQ2_HFI(inst->core) || !inst->reconfig ||
++     type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
++     width != inst->width || height != inst->height ||
++     r->left < 0 || r->top < 0 || !r->width || !r->height)
++  return false;
++ return (u32)r->left < width && (u32)r->top < height &&
++        r->width <= width - (u32)r->left &&
++        r->height <= height - (u32)r->top;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-firmware.h b/drivers/media/platform/qcom/venus/venus-sq2-firmware.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-firmware.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-firmware.h	2026-11-20 21:12:16.547205850 +0100
+@@ -0,0 +1,66 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Called with powered Iris1 resources and serialized by the Venus core owner.
++ * Firmware memory alone is quarantined here. Platform match remains disabled
++ * until core/HFI/IRQ/devres lifetime is adapted too.
++ */
++#ifndef VENUS_SQ2_FIRMWARE_H
++#define VENUS_SQ2_FIRMWARE_H
++static bool sq2_no_tz;
++module_param(sq2_no_tz, bool, 0600);
++static int venus_sq2_shutdown(struct venus_core *core)
++{
++ int ret = sq2_venus_fw_shutdown(&core->sq2_fw_owner);
++ if (core->sq2_secure_active) {
++  ret = sq2_venus_platform_secure_end(core->sq2_platform, ret);
++  if (!ret) core->sq2_secure_active = false;
++#ifdef SQ2_VENUS_SYSTEM_PM
++  if (!ret) core->sq2_no_tz_active = false;
++#endif
++ }
++ return ret;
++}
++
++static int venus_sq2_boot(struct venus_core *core)
++{
++ const struct venus_resources *res = core->res;
++ int ret, stop;
++
++ if (!core->use_tz || !IS_IRIS1(core) || !IS_V4(core) || !res->cp_size)
++  return -EINVAL;
++ if (!core->sq2_platform)
++  return -ENODEV;
++ /* Do not repeat the known-failing second start in error recovery. */
++ if (core->sq2_boot_attempted || core->sq2_fw_owner)
++  return -EBUSY;
++ ret = sq2_venus_platform_secure_begin(core->sq2_platform);
++ if (ret) return ret;
++ core->sq2_secure_active = true;
++ core->sq2_boot_attempted = true;
++ if (!sq2_no_tz) venus_iris1_clock_config(core);
++ ret = sq2_venus_fw_boot(core->dev, &core->sq2_fw_owner, true,
++                        sq2_no_tz ? core->base : NULL);
++ if (ret) {
++  /* NULL owner proves no secure lease remains. A quarantined owner's stop
++   * returns its stored failure without issuing another PAS call. */
++  stop = venus_sq2_shutdown(core);
++  if (stop)
++   dev_err(core->dev, "SQ2 boot=%d shutdown=%d; platform retained\n", ret, stop);
++  return ret;
++ }
++
++#ifdef SQ2_VENUS_SYSTEM_PM
++ core->sq2_no_tz_active = sq2_no_tz;
++#endif
++ if (sq2_no_tz) return 0;
++ ret = qcom_scm_mem_protect_video_var(res->cp_start, res->cp_size,
++                                    res->cp_nonpixel_start, res->cp_nonpixel_size);
++ if (ret) {
++  stop = venus_sq2_shutdown(core);
++  if (stop)
++   dev_err(core->dev, "SQ2 protection=%d shutdown=%d; firmware owner retained\n",
++           ret, stop);
++ }
++ return ret;
++}
++
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-frame-sizes.h b/drivers/media/platform/qcom/venus/venus-sq2-frame-sizes.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-frame-sizes.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-frame-sizes.h	2026-11-20 21:12:16.556885511 +0100
+@@ -0,0 +1,31 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef VENUS_SQ2_FRAME_SIZES_H
++#define VENUS_SQ2_FRAME_SIZES_H
++/* ENUM_FRAMESIZES describes the requested compressed format, not the active
++ * session's codec. Do not mutate inst->hfi_codec to answer a read-only query. */
++static int venus_sq2_enum_sizes(struct venus_core *core,struct v4l2_frmsizeenum *f)
++{
++ u32 codec,i;const struct hfi_plat_caps *c;
++ const struct hfi_capability *w=NULL,*h=NULL;
++ switch(f->pixel_format){
++ case V4L2_PIX_FMT_H264:codec=HFI_VIDEO_CODEC_H264;break;
++ case V4L2_PIX_FMT_HEVC:codec=HFI_VIDEO_CODEC_HEVC;break;
++ case V4L2_PIX_FMT_VP8:codec=HFI_VIDEO_CODEC_VP8;break;
++ case V4L2_PIX_FMT_VP9:codec=HFI_VIDEO_CODEC_VP9;break;
++ case V4L2_PIX_FMT_MPEG1:codec=HFI_VIDEO_CODEC_MPEG1;break;
++ case V4L2_PIX_FMT_MPEG2:codec=HFI_VIDEO_CODEC_MPEG2;break;
++ default:return -EINVAL;
++ }
++ if(f->index)return -EINVAL;
++ c=venus_caps_by_codec(core,codec,VIDC_SESSION_TYPE_DEC);if(!c)return -EINVAL;
++ for(i=0;i<c->num_caps;i++){
++  if(c->caps[i].capability_type==HFI_CAPABILITY_FRAME_WIDTH)w=&c->caps[i];
++  if(c->caps[i].capability_type==HFI_CAPABILITY_FRAME_HEIGHT)h=&c->caps[i];
++ }
++ if(!w||!h||!w->step_size||!h->step_size||w->min>w->max||h->min>h->max)return -EINVAL;
++ f->type=V4L2_FRMSIZE_TYPE_STEPWISE;
++ f->stepwise.min_width=w->min;f->stepwise.max_width=w->max;f->stepwise.step_width=w->step_size;
++ f->stepwise.min_height=h->min;f->stepwise.max_height=h->max;f->stepwise.step_height=h->step_size;
++ return 0;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-intbuf.h b/drivers/media/platform/qcom/venus/venus-sq2-intbuf.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-intbuf.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-intbuf.h	2026-11-20 21:12:16.565727837 +0100
+@@ -0,0 +1,64 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Included after struct intbuf in helpers.c. No callback retains inst/IDA. */
++#ifndef VENUS_SQ2_INTBUF_H
++#define VENUS_SQ2_INTBUF_H
++static void *sq2_intbuf_alloc(struct venus_inst *inst, struct intbuf *buf)
++{
++ void *va;
++ buf->sq2_core = inst->core;
++ if (IS_SQ2_HFI(inst->core)) {
++  if (sq2_venus_vb2_reserve(inst->core, buf->size)) return NULL;
++  buf->sq2_charged = buf->size;
++ }
++ va = dma_alloc_attrs(inst->core->dev, buf->size, &buf->da, GFP_KERNEL, buf->attrs);
++ if (!va && buf->sq2_charged) {
++  sq2_venus_vb2_unreserve(inst->core, buf->sq2_charged);
++  buf->sq2_charged = 0;
++ }
++ return va;
++}
++
++static void sq2_intbuf_dma_free(struct venus_inst *inst, struct intbuf *buf)
++{
++ dma_free_attrs(inst->core->dev, buf->size, buf->va, buf->da, buf->attrs);
++ if (buf->sq2_charged) {
++  sq2_venus_vb2_unreserve(buf->sq2_core, buf->sq2_charged);
++  buf->sq2_charged = 0;
++ }
++}
++
++static void sq2_intbuf_release(struct sq2_venus_retired *entry)
++{
++ struct intbuf *buf = container_of(entry, struct intbuf, sq2_retired);
++ struct device *dev = buf->sq2_dev;
++ dma_free_attrs(dev, buf->size, buf->va, buf->da, buf->attrs);
++ if (buf->sq2_charged) sq2_venus_vb2_unreserve(buf->sq2_core, buf->sq2_charged);
++ kfree(buf);
++ put_device(dev);
++}
++
++static void sq2_intbuf_retire(struct venus_inst *inst, struct intbuf *buf)
++{
++ if (buf->list.next) list_del_init(&buf->list);
++ else INIT_LIST_HEAD(&buf->list); /* failed SET before list insertion */
++ buf->sq2_dev = get_device(inst->core->dev);
++ INIT_LIST_HEAD(&buf->sq2_retired.list);
++ buf->sq2_retired.release = sq2_intbuf_release;
++ sq2_venus_retire(inst->core, &buf->sq2_retired);
++}
++
++/* Called after unlinking the HFI instance, before freeing inst. This includes
++ * FIRMWARE-owned DPBs skipped by the stock normal free helper. They remain
++ * DMA-mapped, with device and core ownership, until confirmed PAS stop.
++ */
++void venus_helper_sq2_retire_buffers(struct venus_inst *inst)
++{
++ struct intbuf *buf, *next;
++ if (!IS_SQ2_HFI(inst->core)) return;
++ list_for_each_entry_safe(buf, next, &inst->dpbbufs, list)
++  sq2_intbuf_retire(inst, buf);
++ list_for_each_entry_safe(buf, next, &inst->internalbufs, list)
++  sq2_intbuf_retire(inst, buf);
++}
++EXPORT_SYMBOL_GPL(venus_helper_sq2_retire_buffers);
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-min-output.h b/drivers/media/platform/qcom/venus/venus-sq2-min-output.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-min-output.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-min-output.h	2026-11-20 21:12:16.575979611 +0100
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Only publish an actual initialized HFI session's input-buffer requirement.
++ * Opening a device or setting its format is not an HFI SESSION_INIT. */
++#ifndef VENUS_SQ2_MIN_OUTPUT_H
++#define VENUS_SQ2_MIN_OUTPUT_H
++static int venus_sq2_min_output_ctrl(struct venus_inst *inst,
++                                    struct v4l2_ctrl *ctrl)
++{
++ struct hfi_buffer_requirements req;
++ enum hfi_version version = inst->core->res->hfi_version;
++ u32 count;
++ int ret;
++ if (inst->state == INST_UNINIT) return -EAGAIN;
++ ret = venus_helper_get_bufreq(inst, HFI_BUFFER_INPUT, &req);
++ if (ret) return ret;
++ count = hfi_bufreq_get_count_min(&req, version);
++ if (count > ctrl->maximum) return -ERANGE;
++ ctrl->val = count;
++ return 0;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-omx-flags.h b/drivers/media/platform/qcom/venus/venus-sq2-omx-flags.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-omx-flags.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-omx-flags.h	2026-11-20 21:12:16.584329204 +0100
+@@ -0,0 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef VENUS_SQ2_OMX_FLAGS_H
++#define VENUS_SQ2_OMX_FLAGS_H
++/* Downstream 0x20000 overlaps upstream timestamp-source bits. */
++#define SQ2_V4L2_BUF_FLAG_CODECCONFIG 0x01000000U
++static inline u32 sq2_omx_input_flags(u32 flags)
++{
++ return flags & SQ2_V4L2_BUF_FLAG_CODECCONFIG ? HFI_BUFFERFLAG_CODECCONFIG : 0;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-omx.h b/drivers/media/platform/qcom/venus/venus-sq2-omx.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-omx.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-omx.h	2026-11-20 21:12:16.592192678 +0100
+@@ -0,0 +1,119 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef VENUS_SQ2_OMX_H
++#define VENUS_SQ2_OMX_H
++/* The standard resolution bit stays first. Additional words carry actual HFI
++ * sequence fields and their presence mask; old V4L2 clients ignore them. */
++static void sq2_omx_sequence(struct v4l2_event *event,
++                            const struct hfi_event_data *data)
++{
++ u32 payload[] = { V4L2_EVENT_SRC_CH_RESOLUTION, 0x51324d31,
++                  data->sq2_sequence_fields, data->height, data->width,
++                  data->bit_depth, data->pic_struct, data->colour_space };
++ memcpy(event->u.data, payload, sizeof(payload));
++}
++
++/* Called with the state lock held by the sequence callback. A blocking OMX
++ * flush must let that callback run without issuing a second shared completion. */
++static int sq2_omx_flush_output(struct venus_inst *inst)
++{
++ if (inst->sq2_omx_flush_flags) {
++  if (!(inst->sq2_omx_flush_flags & 2))
++   inst->sq2_omx_flush_output_pending = true;
++  return 0;
++ }
++ return hfi_session_flush(inst, HFI_FLUSH_OUTPUT, false);
++}
++
++/* Private downstream FLUSH. Completion means an acknowledged HFI flush,
++ * then release of any still-software-owned buffers, never a guessed event. */
++static int sq2_omx_flush(struct venus_inst *inst, u32 flags)
++{
++ struct vb2_v4l2_buffer *buffer;
++ u32 type;
++ bool output_flushed;
++ int ret;
++ if (!flags || (flags & ~3U)) return -EINVAL;
++ if (!IS_SQ2_HFI(inst->core)) return -EOPNOTSUPP;
++ /* Queue ioctls stay serialized while the IRQ callback takes the state lock. */
++ mutex_lock(&inst->ctx_q_lock);
++ mutex_lock(&inst->lock);
++ if (inst->session_error ||
++     test_bit(0, &inst->core->sys_error)) {
++  ret = -EIO;
++  goto out;
++ }
++ /* Before OUTPUT's first queued buffer starts HFI, CAPTURE buffers can
++  * already be queued by OMX prewarming. They are exclusively software-owned;
++  * return them through VB2 without sending FLUSH to a non-started firmware
++  * session. Never use this path after a stream has actually started. */
++ if ((inst->state == INST_UNINIT || inst->state == INST_INIT) &&
++     inst->codec_state == VENUS_DEC_STATE_DEINIT &&
++     !inst->streamon_out && !inst->streamon_cap) {
++  output_flushed = false;
++  ret = 0;
++  goto release_software;
++ }
++ if (inst->state != INST_START) {
++  ret = -EIO;
++  goto out;
++ }
++ type = flags == 3 ? HFI_FLUSH_ALL :
++        flags == 1 ? HFI_FLUSH_INPUT : HFI_FLUSH_OUTPUT;
++ inst->sq2_omx_flush_flags = flags;
++ inst->sq2_omx_flush_output_pending = false;
++ mutex_unlock(&inst->lock);
++ ret = hfi_session_flush(inst, type, true);
++ mutex_lock(&inst->lock);
++ if (!ret && inst->sq2_omx_flush_output_pending) {
++  /* An input-only flush cannot acknowledge a DRC output flush. */
++  inst->sq2_omx_flush_flags |= 2;
++  mutex_unlock(&inst->lock);
++  ret = hfi_session_flush(inst, HFI_FLUSH_OUTPUT, true);
++  mutex_lock(&inst->lock);
++ }
++ output_flushed = (inst->sq2_omx_flush_flags & 2) != 0;
++ inst->sq2_omx_flush_flags = 0;
++ inst->sq2_omx_flush_output_pending = false;
++ if (ret) goto out;
++ if (inst->session_error || test_bit(0, &inst->core->sys_error)) {
++  ret = -EIO;
++  goto out;
++ }
++release_software:
++ /* Before start no buffer was submitted; otherwise HFI acknowledged FLUSH. */
++ /* The real firmware has returned ownership. Only buffers still on the
++  * software queue remain here; completed buffers were removed by callbacks. */
++ if (flags & 1)
++  while ((buffer = v4l2_m2m_src_buf_remove(inst->m2m_ctx))) {
++   vb2_set_plane_payload(&buffer->vb2_buf, 0, 0);
++   buffer->flags = 0;
++   v4l2_m2m_buf_done(buffer, VB2_BUF_STATE_DONE);
++  }
++ if (flags & 2) {
++  /* A completed EOS latch otherwise hides real buffers returned by FLUSH. */
++  vb2_clear_last_buffer_dequeued(v4l2_m2m_get_dst_vq(inst->m2m_ctx));
++  while ((buffer = v4l2_m2m_dst_buf_remove(inst->m2m_ctx))) {
++   vb2_set_plane_payload(&buffer->vb2_buf, 0, 0);
++   buffer->flags = 0;
++   v4l2_m2m_buf_done(buffer, VB2_BUF_STATE_DONE);
++  }
++ }
++ if ((flags & 1) && (flags & 2))
++  memset(inst->tss, 0, sizeof(inst->tss));
++ if ((flags & 1) && inst->streamon_cap &&
++     (inst->codec_state == VENUS_DEC_STATE_DRAIN ||
++      inst->codec_state == VENUS_DEC_STATE_STOPPED)) {
++  inst->drain_active = false;
++  inst->codec_state = VENUS_DEC_STATE_DECODING;
++ }
++ /* Flushing output/all returns internal DPB buffers from firmware too. Re-queue
++  * them when capture remains active (not before start or mid-DRC teardown). */
++ if (output_flushed && inst->streamon_cap &&
++     inst->codec_state != VENUS_DEC_STATE_DRC)
++  ret = venus_helper_queue_dpb_bufs(inst);
++out:
++ mutex_unlock(&inst->lock);
++ mutex_unlock(&inst->ctx_q_lock);
++ return ret;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-resources.h b/drivers/media/platform/qcom/venus/venus-sq2-resources.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-resources.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-resources.h	2026-11-20 21:12:16.599046206 +0100
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Explicit laboratory match, not an alias for stock SC8180X or SM8150.
++ * Clock/reset/ICC are owned by sq2-venus-power, not stock PM frequency tables.
++ * HFI4 queries firmware for buffer requirements and codec capabilities.
++ * Protection values exactly match the successful six-frame private test.
++ */
++static const struct venus_resources sq2_lab_res = {
++ .iris1 = true,
++ .sq2_windows_hfi = true,
++ .hfi_version = HFI_VERSION_4XX,
++ .dma_mask = DMA_BIT_MASK(32),
++ .vmem_id = VIDC_RESOURCE_NONE,
++ .cp_start = 0,
++ .cp_size = 0x25800000,
++ .cp_nonpixel_start = 0x1000000,
++ .cp_nonpixel_size = 0x24800000,
++ .fwname = "qcom/venus-5.2/venus.mbn",
++};
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-session-end.h b/drivers/media/platform/qcom/venus/venus-sq2-session-end.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-session-end.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-session-end.h	2026-11-20 21:12:16.606101618 +0100
+@@ -0,0 +1,29 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef VENUS_SQ2_SESSION_END_H
++#define VENUS_SQ2_SESSION_END_H
++/* Caller serializes session operations. A timed-out END cannot be retried or
++ * used to authorize DMA reclamation. The reply has its own completion/error. */
++static int sq2_session_end(struct venus_inst *inst)
++{
++ int ret;
++ if (test_bit(0, &inst->core->sys_error)) return -EIO;
++ if (inst->sq2_end_confirmed) return 0;
++ if (inst->sq2_end_sent) return -EIO;
++ if (inst->state == INST_UNINIT) return 0; /* no confirmation is fabricated */
++ if (inst->state < INST_INIT) return -EINVAL;
++ reinit_completion(&inst->sq2_end_done);
++ inst->sq2_end_error = HFI_ERR_NONE;
++ inst->sq2_end_sent = true;
++ ret = inst->core->ops->session_end(inst);
++ if (ret) return ret;
++ if (!wait_for_completion_timeout(&inst->sq2_end_done, TIMEOUT)) return -ETIMEDOUT;
++ /* A successful END confirms teardown even after an earlier session error.
++  * Preserve that error for clients; it does not invalidate this separate reply. */
++ if (inst->sq2_end_error != HFI_ERR_NONE ||
++     test_bit(0, &inst->core->sys_error)) return -EIO;
++ inst->sq2_end_confirmed = true;
++ sq2_venus_scope_end(inst);
++ inst->state = INST_UNINIT;
++ return 0;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-system-pm.h b/drivers/media/platform/qcom/venus/venus-sq2-system-pm.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-system-pm.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-system-pm.h	2026-11-20 21:12:16.612241255 +0100
+@@ -0,0 +1,201 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Included after venus-sq2-core.h. System sleep only: runtime PM stays resident.
++ * Stop CPU and verify DMA unmap BEFORE freeing HFI; retain platform handles and
++ * genpd attachments through the PM walk. Only a proven clean stop grants one
++ * restart on resume. A failed stop/start remains quarantined until reboot. */
++#ifndef VENUS_SQ2_SYSTEM_PM_INTEGRATION_H
++#define VENUS_SQ2_SYSTEM_PM_INTEGRATION_H
++#include "hfi_venus.h"
++
++/* Published SQ2 cores and this module remain pinned until reboot. Read-only
++ * observations do not clear errors or request firmware/PM transitions. */
++static struct venus_core *sq2_pm_status_core;
++#include "venus-sq2-avc-export.h"
++static const char *sq2_pm_stage = "probe";
++static void venus_sq2_pm_publish(struct venus_core *core)
++{
++ WRITE_ONCE(sq2_pm_status_core, core);
++}
++static int venus_sq2_pm_status_get(char *buf, const struct kernel_param *kp)
++{
++ struct venus_core *core = READ_ONCE(sq2_pm_status_core);
++ int n;
++ (void)kp;
++ if (!core) return scnprintf(buf, PAGE_SIZE, "unpublished\n");
++ mutex_lock(&core->pm_lock);
++ mutex_lock(&core->lock);
++ mutex_lock(&core->sq2_retire_lock);
++ n = scnprintf(buf, PAGE_SIZE,
++  "stage=%s phase=%u error=%d sys_error=%d core_state=%u hfi_error=%u fw_owner=%d secure=%d no_tz=%d hfi=%d dma_stopped=%d insts=%d vb2_bytes=%llu stops=%lu starts=%lu\n",
++  READ_ONCE(sq2_pm_stage), core->sq2_system_pm.phase, core->sq2_system_pm.error,
++  !!test_bit(0, &core->sys_error), core->state, core->error,
++  !!core->sq2_fw_owner, core->sq2_secure_active, core->sq2_no_tz_active,
++  !!core->priv, core->sq2_dma_stopped, atomic_read(&core->insts_count),
++  (unsigned long long)core->sq2_vb2_bytes,
++  core->sq2_system_pm.stops, core->sq2_system_pm.starts);
++ mutex_unlock(&core->sq2_retire_lock);
++ mutex_unlock(&core->lock);
++ mutex_unlock(&core->pm_lock);
++ return n;
++}
++static const struct kernel_param_ops sq2_pm_status_ops = {
++ .get = venus_sq2_pm_status_get,
++};
++module_param_cb(sq2_pm_status, &sq2_pm_status_ops, NULL, 0400);
++static int venus_sq2_pm_result(struct venus_core *core, const char *stage, int ret)
++{
++ WRITE_ONCE(sq2_pm_stage, stage);
++ if (ret)
++  dev_err(core->dev, "SQ2_SYSTEM_PM stage=%s ret=%d phase=%u sys_error=%d core_state=%u hfi_error=%u fw_owner=%d secure=%d hfi=%d\n",
++   stage, ret, core->sq2_system_pm.phase, !!test_bit(0, &core->sys_error),
++   core->state, core->error, !!core->sq2_fw_owner,
++   core->sq2_secure_active, !!core->priv);
++ return ret;
++}
++
++
++static int venus_sq2_pm_idle(void *data)
++{
++ struct venus_core *core = data;
++ int ret = 0;
++ mutex_lock(&core->lock);
++ if (!core->sq2_no_tz_active) ret = -EOPNOTSUPP;
++ else if (test_bit(0, &core->sys_error) || core->state != CORE_INIT ||
++          core->error != HFI_ERR_NONE || !core->priv ||
++          !core->sq2_fw_owner || !core->sq2_secure_active) ret = -EIO;
++ else if (!list_empty(&core->instances) || atomic_read(&core->insts_count))
++  ret = -EBUSY;
++ mutex_unlock(&core->lock);
++ mutex_lock(&core->sq2_retire_lock);
++ /* Retired buffers are firmware-owned until a confirmed CPU stop. They
++  * must not block the very stop that makes their reclamation safe. */
++ if (!ret && core->sq2_dma_stopped) ret = -EIO;
++ mutex_unlock(&core->sq2_retire_lock);
++ return ret;
++}
++
++static int venus_sq2_pm_stop(void *data)
++{
++ struct venus_core *core = data;
++ int ret;
++ /* STOPPING already excludes new sessions; do not reset a live firmware
++  * before the existing HFI idle/PC_READY handshake has completed. */
++ cancel_delayed_work_sync(&core->work);
++ ret = venus_sq2_pm_result(core, "stop:prepare-pc",
++  venus_hfi_prepare_system_stop(core));
++ if (ret) return ret;
++ ret = venus_sq2_pm_result(core, "stop:irq-disable",
++  sq2_venus_platform_irq(core->sq2_platform, false));
++ if (ret) return ret;
++ cancel_delayed_work_sync(&core->work);
++ ret = venus_sq2_pm_result(core, "stop:recheck-idle", venus_sq2_pm_idle(core));
++ if (ret) {
++  if (ret == -EBUSY) {
++   ret = venus_sq2_pm_result(core, "stop:busy-irq-restore",
++    sq2_venus_platform_irq(core->sq2_platform, true));
++   if (!ret) return SQ2_PM_STOP_UNCHANGED_BUSY;
++  }
++  return ret;
++ }
++ /* This path asserts no-TZ reset, confirms the complete 5MiB unmap and
++  * releases the firmware lease. It never requests a second PAS start. */
++ ret = venus_sq2_pm_result(core, "stop:firmware-shutdown", venus_shutdown(core));
++ if (ret) return ret;
++ if (core->sq2_fw_owner || core->sq2_secure_active)
++  return venus_sq2_pm_result(core, "stop:owner-retained", -EUCLEAN);
++ ret = venus_sq2_pm_result(core, "stop:hfi-deinit", hfi_core_deinit(core, false));
++ if (ret) return ret;
++ hfi_destroy(core);
++ sq2_venus_retire_stopped(core);
++ mutex_lock(&core->sq2_retire_lock);
++ ret = (core->sq2_vb2_bytes || !list_empty(&core->sq2_retired)) ? -EUCLEAN : 0;
++ mutex_unlock(&core->sq2_retire_lock);
++ /* Unknown live backing is retained with the stopped owner; never silently
++  * discard charges or authorize a restart with unreconciled DMA ownership. */
++ if (ret) return venus_sq2_pm_result(core, "stop:retired-buffers", ret);
++ return venus_sq2_pm_result(core, "stop:power-quiet",
++  sq2_venus_platform_system_quiet(core->sq2_platform));
++}
++
++static int venus_sq2_pm_start(void *data)
++{
++ struct venus_core *core = data;
++ int ret, stop, quiet;
++ if (core->priv || core->sq2_fw_owner || core->sq2_secure_active)
++  return venus_sq2_pm_result(core, "start:owner-retained", -EUCLEAN);
++ ret = venus_sq2_pm_result(core, "start:power-restore",
++  sq2_venus_platform_system_restore(core->sq2_platform));
++ if (ret) goto fail;
++ ret = venus_sq2_pm_result(core, "start:hfi-create",
++  hfi_create(core, &venus_core_ops));
++ if (ret) goto fail;
++ mutex_lock(&core->sq2_retire_lock);
++ if (core->sq2_vb2_bytes || !list_empty(&core->sq2_retired)) {
++  mutex_unlock(&core->sq2_retire_lock);
++  ret = -EUCLEAN; goto fail;
++ }
++ core->sq2_dma_stopped = false;
++ mutex_unlock(&core->sq2_retire_lock);
++ /* Only SQ2_PM_OFF reaches this callback, after complete verified stop. */
++ core->sq2_boot_attempted = false;
++ ret = venus_sq2_pm_result(core, "start:firmware-boot",
++  venus_boot(core));
++ if (ret) goto fail;
++ ret = venus_sq2_pm_result(core, "start:hfi-resume",
++  hfi_core_resume(core, true));
++ if (ret) goto fail;
++ ret = venus_sq2_pm_result(core, "start:irq-enable",
++  sq2_venus_platform_irq(core->sq2_platform, true));
++ if (ret) goto fail;
++ ret = venus_sq2_pm_result(core, "start:hfi-init",
++  hfi_core_init(core));
++ if (ret) goto fail;
++ ret = venus_sq2_pm_result(core, "start:enumerate",
++  venus_enumerate_codecs(core, VIDC_SESSION_TYPE_DEC));
++ if (ret) goto fail;
++ if (test_bit(0, &core->sys_error)) {
++  ret = venus_sq2_pm_result(core, "start:sys-error", -EIO); goto fail;
++ }
++ WRITE_ONCE(sq2_pm_stage, "start:ready");
++ return 0;
++fail:
++ sq2_venus_platform_irq(core->sq2_platform, false);
++ cancel_delayed_work_sync(&core->work);
++ stop = venus_shutdown(core);
++ quiet = -EBUSY;
++ if (!stop && !core->sq2_fw_owner && !core->sq2_secure_active) {
++  if (core->priv && !hfi_core_deinit(core, false)) hfi_destroy(core);
++  sq2_venus_retire_stopped(core);
++  quiet = sq2_venus_platform_system_quiet(core->sq2_platform);
++ }
++ set_bit(0, &core->sys_error);
++ dev_err(core->dev, "SQ2_SYSTEM_PM restart=%d cleanup=%d quiet=%d; no retry, owner retained\n",
++         ret, stop, quiet);
++ return ret;
++}
++static const struct sq2_system_pm_ops venus_sq2_system_ops = {
++ .idle = venus_sq2_pm_idle, .stop = venus_sq2_pm_stop, .start = venus_sq2_pm_start,
++};
++static __maybe_unused int venus_sq2_system_suspend(struct device *dev)
++{
++ struct venus_core *core = dev_get_drvdata(dev);
++ int ret;
++ if (!IS_SQ2_HFI(core)) return pm_runtime_force_suspend(dev);
++ mutex_lock(&core->pm_lock);
++ ret = sq2_system_pm_suspend(&core->sq2_system_pm, &venus_sq2_system_ops, core);
++ if (ret && core->sq2_system_pm.phase == SQ2_PM_BROKEN)
++  set_bit(0, &core->sys_error);
++ mutex_unlock(&core->pm_lock);
++ return ret;
++}
++static __maybe_unused int venus_sq2_system_resume(struct device *dev)
++{
++ struct venus_core *core = dev_get_drvdata(dev);
++ int ret;
++ if (!IS_SQ2_HFI(core)) return pm_runtime_force_resume(dev);
++ mutex_lock(&core->pm_lock);
++ ret = sq2_system_pm_resume(&core->sq2_system_pm, &venus_sq2_system_ops, core);
++ mutex_unlock(&core->pm_lock);
++ return ret;
++}
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-vb2.h b/drivers/media/platform/qcom/venus/venus-sq2-vb2.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-vb2.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-vb2.h	2026-11-20 21:12:16.619269634 +0100
+@@ -0,0 +1,139 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Included in vdec.c. Backing allocations and imported mappings survive VB2
++ * teardown until their bound session END or PAS stop is confirmed. Objects
++ * reused by a new session are rebound at HFI submission, not allocation.
++ * Standard platforms retain vb2_dma_contig_memops unchanged.
++ */
++#ifndef VENUS_SQ2_VB2_H
++#define VENUS_SQ2_VB2_H
++#ifndef SQ2_VENUS_VB2_HOST_TEST
++#include <linux/dma-buf.h>
++#endif
++#include "sq2-venus-retire.h"
++struct sq2_vb2_lease {
++ struct sq2_venus_retired retired;
++ struct venus_core *core;
++ void *backing;
++ struct dma_buf *dbuf;
++ bool mapped;
++ unsigned long charged;
++};
++
++static void sq2_vb2_release(struct sq2_venus_retired *entry)
++{
++ struct sq2_vb2_lease *lease = container_of(entry, struct sq2_vb2_lease, retired);
++ /* These allocator operations do not dereference the old vb2_buffer. */
++ if (lease->dbuf) {
++  if (lease->mapped) vb2_dma_contig_memops.unmap_dmabuf(lease->backing);
++  vb2_dma_contig_memops.detach_dmabuf(lease->backing);
++  dma_buf_put(lease->dbuf);
++ } else {
++  vb2_dma_contig_memops.put(lease->backing);
++ }
++ sq2_venus_vb2_unreserve(lease->core, lease->charged);
++ kfree(lease);
++ module_put(THIS_MODULE);
++}
++
++static struct sq2_vb2_lease *sq2_vb2_new(struct vb2_buffer *vb, unsigned long bytes)
++{
++ struct venus_inst *inst = vb2_get_drv_priv(vb->vb2_queue);
++ struct sq2_vb2_lease *lease;
++ int ret;
++ if (!try_module_get(THIS_MODULE)) return ERR_PTR(-ENODEV);
++ lease = kzalloc(sizeof(*lease), GFP_KERNEL);
++ if (!lease) { module_put(THIS_MODULE); return ERR_PTR(-ENOMEM); }
++ lease->core = inst->core;
++ ret = sq2_venus_vb2_reserve(inst->core, bytes);
++ if (ret) { kfree(lease); module_put(THIS_MODULE); return ERR_PTR(ret); }
++ lease->charged = bytes;
++ INIT_LIST_HEAD(&lease->retired.list);
++ lease->retired.release = sq2_vb2_release;
++ return lease;
++}
++
++static void sq2_vb2_failed(struct sq2_vb2_lease *lease)
++{
++ sq2_venus_vb2_unreserve(lease->core, lease->charged);
++ kfree(lease);
++ module_put(THIS_MODULE);
++}
++
++static void *sq2_vb2_alloc(struct vb2_buffer *vb, struct device *dev, unsigned long size)
++{
++ struct sq2_vb2_lease *lease = sq2_vb2_new(vb, size);
++ void *backing;
++ if (IS_ERR(lease)) return lease;
++ backing = vb2_dma_contig_memops.alloc(vb, dev, size);
++ if (IS_ERR_OR_NULL(backing)) { sq2_vb2_failed(lease); return backing; }
++ lease->backing = backing;
++ return lease;
++}
++
++static void *sq2_vb2_attach(struct vb2_buffer *vb, struct device *dev,
++                           struct dma_buf *dbuf, unsigned long size)
++{
++ /* The attachment maps the exporter's full sg_table, not just size bytes. */
++ struct sq2_vb2_lease *lease = sq2_vb2_new(vb, dbuf->size);
++ void *backing;
++ if (IS_ERR(lease)) return lease;
++ /* VB2 drops its reference after detach, even when our release is deferred. */
++ get_dma_buf(dbuf);
++ backing = vb2_dma_contig_memops.attach_dmabuf(vb, dev, dbuf, size);
++ if (IS_ERR_OR_NULL(backing)) {
++  dma_buf_put(dbuf); sq2_vb2_failed(lease); return backing;
++ }
++ lease->backing = backing;
++ lease->dbuf = dbuf;
++ return lease;
++}
++
++static int sq2_vb2_map(void *mem)
++{
++ struct sq2_vb2_lease *lease = mem;
++ int ret;
++ if (lease->mapped) return 0;
++ ret = vb2_dma_contig_memops.map_dmabuf(lease->backing);
++ if (!ret) lease->mapped = true;
++ return ret;
++}
++
++static void sq2_vb2_unmap(void *mem)
++{
++ /* Keep the same mapping even across dqbuf/requeue. Detach transfers it to
++  * the core retirement list; confirmed session END or PAS stop releases it. */
++ (void)mem;
++}
++
++static void sq2_vb2_retire(void *mem)
++{
++ struct sq2_vb2_lease *lease = mem;
++ /* VB2 serializes detach against submission; no scope means no HFI publication. */
++ if (!lease->retired.scope) sq2_vb2_release(&lease->retired);
++ else sq2_venus_retire(lease->core, &lease->retired);
++}
++
++static void sq2_vb2_prepare(void *mem)
++{ struct sq2_vb2_lease *l = mem; vb2_dma_contig_memops.prepare(l->backing); }
++static void sq2_vb2_finish(void *mem)
++{ struct sq2_vb2_lease *l = mem; vb2_dma_contig_memops.finish(l->backing); }
++static void *sq2_vb2_cookie(struct vb2_buffer *vb, void *mem)
++{ struct sq2_vb2_lease *l = mem; return vb2_dma_contig_memops.cookie(vb, l->backing); }
++static void *sq2_vb2_vaddr(struct vb2_buffer *vb, void *mem)
++{ struct sq2_vb2_lease *l = mem; return vb2_dma_contig_memops.vaddr(vb, l->backing); }
++static unsigned int sq2_vb2_users(void *mem)
++{ struct sq2_vb2_lease *l = mem; return vb2_dma_contig_memops.num_users(l->backing); }
++static int sq2_vb2_mmap(void *mem, struct vm_area_struct *vma)
++{ struct sq2_vb2_lease *l = mem; return vb2_dma_contig_memops.mmap(l->backing, vma); }
++static struct dma_buf *sq2_vb2_export(struct vb2_buffer *vb, void *mem, unsigned long flags)
++{ struct sq2_vb2_lease *l = mem; return vb2_dma_contig_memops.get_dmabuf(vb, l->backing, flags); }
++
++static const struct vb2_mem_ops sq2_vb2_memops = {
++ .alloc = sq2_vb2_alloc, .put = sq2_vb2_retire, .get_dmabuf = sq2_vb2_export,
++ .attach_dmabuf = sq2_vb2_attach, .detach_dmabuf = sq2_vb2_retire,
++ .map_dmabuf = sq2_vb2_map, .unmap_dmabuf = sq2_vb2_unmap,
++ .prepare = sq2_vb2_prepare, .finish = sq2_vb2_finish,
++ .cookie = sq2_vb2_cookie, .vaddr = sq2_vb2_vaddr,
++ .num_users = sq2_vb2_users, .mmap = sq2_vb2_mmap,
++};
++#endif
+diff -ruN a/drivers/media/platform/qcom/venus/venus-sq2-vp9-eos.h b/drivers/media/platform/qcom/venus/venus-sq2-vp9-eos.h
+--- a/drivers/media/platform/qcom/venus/venus-sq2-vp9-eos.h	1970-01-01 01:00:00.000000000 +0100
++++ b/drivers/media/platform/qcom/venus/venus-sq2-vp9-eos.h	2026-11-20 21:12:16.628503856 +0100
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef VENUS_SQ2_VP9_EOS_H
++#define VENUS_SQ2_VP9_EOS_H
++
++/* SQ2 firmware returns a successful, empty VP9 drain marker with DROP_FRAME.
++ * Observed packet: error=0, bytes=offset=0, EOS|SYNCFRAME|DROP_FRAME.
++ * Normalize only this exact marker; preserve every other error/flag case.
++ * Caller must identify the SQ2 VP9 decoder, never an encoder or other SoC.
++ */
++static inline unsigned int
++venus_sq2_vp9_eos_flags(int sq2_vp9_decoder, unsigned int error,
++                       unsigned int bytes, unsigned int offset,
++                       unsigned int flags)
++{
++ if (sq2_vp9_decoder && !error && !bytes && !offset &&
++     flags == (HFI_BUFFERFLAG_EOS | HFI_BUFFERFLAG_SYNCFRAME |
++               HFI_BUFFERFLAG_DROP_FRAME))
++  return flags & ~HFI_BUFFERFLAG_DROP_FRAME;
++ return flags;
++}
++#endif

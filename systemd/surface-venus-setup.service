@@ -1,0 +1,13 @@
+[Unit]
+Description=Surface Pro X SQ2 Qualcomm Venus Hardware Video Decoder Setup
+After=basic.target local-fs.target systemd-udev-trigger.service rmtfs.service surface-camera-setup.service
+Before=gdm.service display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/surface-venus-load
+RemainAfterExit=yes
+TimeoutSec=20
+
+[Install]
+WantedBy=graphical.target

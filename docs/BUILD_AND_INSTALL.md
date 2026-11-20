@@ -193,6 +193,43 @@ sudo systemctl enable --now surface-iptsd.service
 make -C drivers/spx_tcs3430 && sudo make -C drivers/spx_tcs3430 install
 ```
 
+## 9. Qualcomm Venus 4K Hardware Video Decode (`videocc-sm8150` + `venus-{core,dec}`)
+
+See [`docs/VENUS_VIDEO_DECODE.md`](VENUS_VIDEO_DECODE.md) for architecture notes, EL1 PAS 9 details, and verified 4K SHA-256 test results.
+
+1. **Stage `venus.mbn` firmware** (extracted from your Windows partition):
+   - `/lib/firmware/qcom/venus-5.2/venus.mbn` (`VIDEO.IR.1.2-00042-PROD-1` or `VIDEO.IR.1.2-00079-PROD-2`).
+
+2. **Apply kernel patches and build modules**:
+
+```bash
+# In your Linux v7.3 kernel tree:
+git apply patches/0009-clk-qcom-videocc-sm8150-add-sc8180x-compatible.patch
+git apply patches/0010-media-qcom-venus-sq2-iris1-hfi4-decoder.patch
+
+# Build and install videocc-sm8150.ko, venus-core.ko, venus-dec.ko, venus-enc.ko
+# (enable CONFIG_SM_VIDEOCC_8150=m and CONFIG_VIDEO_QCOM_VENUS=m).
+
+# Build and install the runtime Venus DT overlay module:
+make -C drivers/sq2_venus_overlay && sudo make -C drivers/sq2_venus_overlay install
+```
+
+3. **Apply the static VIDEOCC phandle DTB patch and install late-boot service**:
+
+```bash
+# Include dts/sc8180x-surface-pro-x-sq2-venus-videocc.dtsi (or apply
+# dts/venus-videocc-against-lid.patch) and rebuild your DTB.
+
+sudo cp configs/modprobe.d/venus-sq2-guard.conf /etc/modprobe.d/
+sudo install -m 755 scripts/video/surface-venus-load /usr/local/bin/
+sudo cp systemd/surface-venus-setup.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable surface-venus-setup.service
+```
+
+After rebooting, `/dev/video-venus-dec` exposes `qcom-venus-decoder` (V4L2 M2M) for GStreamer (`v4l2h264dec`, `v4l2h265dec`, `v4l2vp9dec`, `v4l2vp8dec`, `v4l2mpeg2dec`) and FFmpeg (`h264_v4l2m2m`, `hevc_v4l2m2m`, `vp9_v4l2m2m`).
+
+
 
 
 

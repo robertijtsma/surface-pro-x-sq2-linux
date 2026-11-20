@@ -1,0 +1,28 @@
+From: robertijtsma <37256770+robertijtsma@users.noreply.github.com>
+Subject: [PATCH] clk: qcom: videocc-sm8150: add qcom,sc8180x-videocc compatible
+
+The SC8180X video clock controller at 0xab00000 exposes the same
+register layout, PLL, branch clocks, resets, and GDSCs (venus_gdsc,
+vcodec0_gdsc, vcodec1_gdsc) as SM8150, and upstream sc8180x.dtsi lists
+compatible = "qcom,sc8180x-videocc", "qcom,sm8150-videocc".
+
+Add an explicit qcom,sc8180x-videocc match entry so the module binds
+cleanly when built out-of-tree or enabled via CONFIG_SM_VIDEOCC_8150.
+---
+ drivers/clk/qcom/videocc-sm8150.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/clk/qcom/videocc-sm8150.c b/drivers/clk/qcom/videocc-sm8150.c
+index 111111111111..222222222222 100644
+--- a/drivers/clk/qcom/videocc-sm8150.c
++++ b/drivers/clk/qcom/videocc-sm8150.c
+@@ -233,6 +233,7 @@ static const struct qcom_cc_desc video_cc_sm8150_desc = {
+ };
+ 
+ static const struct of_device_id video_cc_sm8150_match_table[] = {
++	{ .compatible = "qcom,sc8180x-videocc" },
+ 	{ .compatible = "qcom,sm8150-videocc" },
+ 	{ }
+ };
+-- 
+2.47.0

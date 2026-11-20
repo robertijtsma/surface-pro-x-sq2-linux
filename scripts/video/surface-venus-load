@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "=== Surface Pro X SQ2 Qualcomm Venus Hardware Video Decoder Setup ==="
+
+VIDEOCC_DT="/sys/firmware/devicetree/base/soc@0/clock-controller@ab00000"
+if [ ! -f "$VIDEOCC_DT/phandle" ]; then
+    echo "[i] Active DTB has no static phandle on clock-controller@ab00000 (fallback DTB). Skipping Venus load."
+    exit 0
+fi
+
+PHANDLE_HEX="$(od -An -tx1 -N4 "$VIDEOCC_DT/phandle" | tr -d ' \n')"
+if [ "$PHANDLE_HEX" != "000000f5" ]; then
+    echo "[i] Unexpected clock-controller@ab00000 phandle ($PHANDLE_HEX != 000000f5). Skipping Venus load."
+    exit 0
+fi
+
+echo "[1/4] Loading VIDEOCC clock & GDSC provider (videocc_sm8150)..."
+modprobe videocc_sm8150
+
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -L /sys/bus/platform/devices/ab00000.clock-controller/driver ] && break
+    sleep 0.1
+done
+if [ ! -L /sys/bus/platform/devices/ab00000.clock-controller/driver ]; then
+    echo "[!] ab00000.clock-controller failed to bind videocc_sm8150"
+    exit 1
+fi
+
+echo "[2/4] Applying runtime Venus DT overlay (sq2_venus_overlay)..."
+if [ ! -d /sys/bus/platform/devices/aa00000.venus-sq2 ]; then
+    modprobe sq2_venus_overlay allow=1
+fi
+
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -d /sys/bus/platform/devices/aa00000.venus-sq2 ] && break
+    sleep 0.1
+done
+
+echo "[3/4] Loading Qualcomm Venus core & PAS 9 firmware (venus_core)..."
+modprobe venus_core sq2_platform_allow=1
+
+echo "[4/4] Loading Qualcomm Venus V4L2 M2M decoder (venus_dec)..."
+modprobe venus_dec
+
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    for v in /sys/class/video4linux/video*; do
+        [ -r "$v/name" ] || continue
+        if [ "$(cat "$v/name" 2>/dev/null)" = "qcom-venus-decoder" ]; then
+            DEV="/dev/$(basename "$v")"
+            ln -sfn "$DEV" /dev/video-venus-dec
+            echo "[+] Qualcomm Venus decoder ready: /dev/video-venus-dec -> $DEV"
+            exit 0
+        fi
+    done
+    sleep 0.1
+done
+
+echo "[i] Venus modules loaded (checking V4L2 device names):"
+for v in /sys/class/video4linux/video*; do
+    [ -r "$v/name" ] && echo "  /dev/$(basename "$v"): $(cat "$v/name")"
+done
