@@ -10,8 +10,8 @@ fi
 
 MEDIA_DEV="/dev/media0"
 
-# 0. Keep sensors out of runtime suspend to avoid reset glitches across back-to-back streams
-for i2c_dev in 4-0036 3-0060 3-0010; do
+# 0. Keep OV7251 and OV13858 out of runtime suspend (OV5693 is resumed below after setting 2592x1944)
+for i2c_dev in 3-0060 3-0010; do
     if [ -w "/sys/bus/i2c/devices/$i2c_dev/power/control" ]; then
         echo on > "/sys/bus/i2c/devices/$i2c_dev/power/control"
     fi
@@ -37,6 +37,17 @@ media-ctl -d "$MEDIA_DEV" -l '"msm_csid3":1->"msm_vfe3_rdi0":0[1]'
 media-ctl -d "$MEDIA_DEV" -V '"ov5693 4-0036":0[fmt:SBGGR10_1X10/2592x1944]'
 media-ctl -d "$MEDIA_DEV" -V '"ov13858 3-0010":0[fmt:SGRBG10_1X10/4224x3136]'
 media-ctl -d "$MEDIA_DEV" -V '"ov7251 3-0060":0[fmt:Y10_1X10/640x480]'
+
+# 3b. OV5693 writes global and mode registers only in runtime_resume(); ensure one
+# suspend -> resume cycle after configuring 2592x1944, then keep it in standby.
+if [ -w /sys/bus/i2c/devices/4-0036/power/control ]; then
+    echo auto > /sys/bus/i2c/devices/4-0036/power/control
+    for _ in $(seq 1 30); do
+        [ "$(cat /sys/bus/i2c/devices/4-0036/power/runtime_status 2>/dev/null)" = "suspended" ] && break
+        sleep 0.1
+    done
+    echo on > /sys/bus/i2c/devices/4-0036/power/control
+fi
 
 # 4. Internal CAMSS pad formats
 # Front RGB (OV5693: SBGGR10_1X10 2592x1944)

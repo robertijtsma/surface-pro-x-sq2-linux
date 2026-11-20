@@ -9,6 +9,9 @@ if [ ! -d /sys/firmware/devicetree/base/soc@0/isp@acaf000 ]; then
     exit 0
 fi
 
+# Clear stale symlinks until media-ctl and Y10 format setup completes
+rm -f /dev/video-ir /dev/video-front /dev/video-rear
+
 echo "[1/4] Enabling PMC8180-A camera SPMI LDO rails and CAMCC clocks..."
 modprobe surface_cam_spmi
 modprobe camcc_sc8180x
@@ -24,10 +27,9 @@ modprobe ov7251
 
 echo "[4/4] Loading Qualcomm Spectra 380 CAMSS driver..."
 modprobe qcom_camss
-modprobe surface_ir_sfmt 2>/dev/null || true
 
-for _ in 1 2 3 4 5 6; do
-    [ -e /dev/media0 ] && break
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -e /dev/media0 ] && [ -e /dev/video12 ] && break
     sleep 0.5
 done
 

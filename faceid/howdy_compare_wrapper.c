@@ -9,6 +9,7 @@ int main(int argc, char *argv[])
 	setenv("OPENBLAS_NUM_THREADS", "1", 1);
 	setenv("OPENCV_VIDEOIO_PRIORITY_GSTREAMER", "0", 1);
 	setenv("OPENCV_LOG_LEVEL", "ERROR", 1);
+	alarm(10);
 	execv("/usr/lib/howdy/howdy-compare.bin", argv);
 	return 127;
 }

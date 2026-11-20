@@ -3080,15 +3080,18 @@ Signed-off-by: robertijtsma <37256770+robertijtsma@users.noreply.github.com>
  #include <media/media-entity.h>
  #include <media/v4l2-dev.h>
  #include <media/v4l2-device.h>
-@@ -163,6 +164,7 @@
- 			return -EFAULT;
+@@ -72,6 +73,10 @@
+ {
+ 	struct media_pad *remote;
  
- 		buffer->addr[i] = sg_dma_address(sgt->sgl);
-+			i, sgt, sgt->sgl, &buffer->addr[i]);
- 	}
++	if (!video->vdev.entity.graph_obj.mdev ||
++	    !video->vdev.entity.links.next)
++		return NULL;
++
+ 	remote = media_pad_remote_pad_first(&video->pad);
  
- 	if (format->pixelformat == V4L2_PIX_FMT_NV12 ||
-@@ -180,8 +182,11 @@
+ 	if (!remote || !is_media_entity_v4l2_subdev(remote->entity))
+@@ -180,8 +185,11 @@
  {
  	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
  	struct camss_video *video = vb2_get_drv_priv(vb->vb2_queue);
@@ -3100,7 +3103,7 @@ Signed-off-by: robertijtsma <37256770+robertijtsma@users.noreply.github.com>
  	unsigned int i;
  
  	for (i = 0; i < format->num_planes; i++) {
-@@ -189,6 +194,12 @@
+@@ -189,6 +197,11 @@
  			return -EINVAL;
  
  		vb2_set_plane_payload(vb, i, format->plane_fmt[i].sizeimage);
@@ -3108,20 +3111,10 @@ Signed-off-by: robertijtsma <37256770+robertijtsma@users.noreply.github.com>
 +		sgt = vb2_dma_sg_plane_desc(vb, i);
 +		if (sgt && sgt->sgl) {
 +			buffer->addr[i] = sg_dma_address(sgt->sgl);
-+				i, sgt, sgt->sgl, &buffer->addr[i]);
 +		}
  	}
  
  	vbuf->field = V4L2_FIELD_NONE;
-@@ -203,6 +214,8 @@
- 	struct camss_buffer *buffer = container_of(vbuf, struct camss_buffer,
- 						   vb);
- 
-+		vb, buffer, &buffer->addr[0]);
-+
- 	video->ops->queue_buffer(video, buffer);
- }
- 
 @@ -240,7 +253,9 @@
  	struct video_device *vdev = &video->vdev;
  	int ret;
@@ -3230,14 +3223,17 @@ Signed-off-by: robertijtsma <37256770+robertijtsma@users.noreply.github.com>
  	u32 bytesperline[3] = { 0 };
  	u32 sizeimage[3] = { 0 };
  	u32 width, height;
-@@ -474,6 +514,12 @@
+@@ -474,6 +514,15 @@
  
  	pix_mp = &f->fmt.pix_mp;
  
-+	if (!video->line_based && video_get_subdev_format(video, &sd_fmt) == 0) {
-+		pix_mp->pixelformat = sd_fmt.fmt.pix_mp.pixelformat;
-+		pix_mp->width = sd_fmt.fmt.pix_mp.width;
-+		pix_mp->height = sd_fmt.fmt.pix_mp.height;
++	if (!video->line_based && video->vdev.entity.graph_obj.mdev) {
++		sd_fmt.fmt.pix_mp.pixelformat = pix_mp->pixelformat;
++		if (video_get_subdev_format(video, &sd_fmt) == 0) {
++			pix_mp->pixelformat = sd_fmt.fmt.pix_mp.pixelformat;
++			pix_mp->width = sd_fmt.fmt.pix_mp.width;
++			pix_mp->height = sd_fmt.fmt.pix_mp.height;
++		}
 +	}
 +
  	if (video->line_based)

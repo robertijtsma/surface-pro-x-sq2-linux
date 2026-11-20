@@ -1,14 +1,13 @@
 [Unit]
 Description=Surface Pro X Camera, Privacy LEDs & Windows Hello IR Face ID Setup
-DefaultDependencies=no
-After=systemd-udevd.service systemd-modules-load.service local-fs.target
-Before=display-manager.service gdm.service multi-user.target
+After=basic.target local-fs.target systemd-udev-trigger.service rmtfs.service
+Before=gdm.service display-manager.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/surface-camera-load
 RemainAfterExit=yes
-TimeoutSec=30
+TimeoutSec=25
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical.target

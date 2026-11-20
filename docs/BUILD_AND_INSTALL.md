@@ -65,6 +65,7 @@ For browser WebRTC access via PipeWire (`libcamera`):
 sudo install -m 755 scripts/camera/surface-camera-load /usr/local/bin/
 sudo install -m 755 scripts/camera/surface-camera-check /usr/local/bin/
 sudo install -m 755 scripts/camera/surface-camera-faceid-settings /usr/local/bin/
+sudo cp configs/modprobe.d/blacklist-camera.conf /etc/modprobe.d/
 sudo cp systemd/surface-camera-setup.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now surface-camera-setup.service
