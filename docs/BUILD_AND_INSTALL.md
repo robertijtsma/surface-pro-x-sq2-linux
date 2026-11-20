@@ -184,5 +184,15 @@ sudo systemctl enable --now surface-iptsd.service
 2. **Adreno 685 GPU, DPU, DisplayPort & DISPCC fixes (`patches/0007`)**:
    - Sets `gmem_range_min = 0` and `MSM_PARAM_GMEM_BASE = 0` on Adreno 680/685 (fixing Vulkan GMEM texture corruption), imports the `a680_hwcg` KGSL clock-gating sequence, routes GMU-offset `hwcg[]` entries via `gmu_write()`, counts `frame_pending` before `dpu_encoder_kickoff()`, fixes the DisplayPort runtime-PM reference leak on unplug, and uses `clk_rcg2_shared_no_init_park_ops` on `disp_cc_mdss_mdp_clk_src`.
 
+3. **Hall-Sensor Lid Switch (`SW_LID`), SoundWire AHB Mutex (`patches/0008`), and `spx_tcs3430` Kernel IIO ALS (`drivers/spx_tcs3430/`)**:
+   - Include [`dts/sc8180x-surface-pro-x-sq2-lid.dtsi`](../dts/sc8180x-surface-pro-x-sq2-lid.dtsi) (or apply [`dts/lid-against-typec.patch`](../dts/lid-against-typec.patch)) to enable `gpio-keys-lid` (`SW_LID` on TLMM GPIO 121) and set `als@39` `compatible = "ams,tcs3430"`.
+   - Apply [`patches/0008-soundwire-qcom-serialize-wcd-ahb-bridge-and-validate-fifo.patch`](../patches/0008-soundwire-qcom-serialize-wcd-ahb-bridge-and-validate-fifo.patch) to `drivers/soundwire/qcom.c`.
+   - Build and install the `spx_tcs3430` IIO ambient light sensor module:
+
+```bash
+make -C drivers/spx_tcs3430 && sudo make -C drivers/spx_tcs3430 install
+```
+
+
 
 

@@ -6,11 +6,27 @@
 # ==============================================================================
 set -euo pipefail
 
-check_health() {
-    # 1. Check ADSP state
+get_adsp_state_path() {
+    local r
+    for r in /sys/class/remoteproc/remoteproc*; do
+        [ -e "$r/name" ] || continue
+        if [ "$(cat "$r/name" 2>/dev/null || true)" = "adsp" ]; then
+            echo "$r/state"
+            return 0
+        fi
+    done
     if [ -e /sys/class/remoteproc/remoteproc2/state ]; then
+        echo "/sys/class/remoteproc/remoteproc2/state"
+    fi
+}
+
+check_health() {
+    # 1. Check ADSP state (dynamically resolved across remoteproc nodes)
+    local adsp_state_file
+    adsp_state_file=$(get_adsp_state_path)
+    if [ -n "$adsp_state_file" ] && [ -e "$adsp_state_file" ]; then
         local adsp_state
-        adsp_state=$(cat /sys/class/remoteproc/remoteproc2/state 2>/dev/null || true)
+        adsp_state=$(cat "$adsp_state_file" 2>/dev/null || true)
         if [ "$adsp_state" != "running" ]; then
             return 1
         fi
@@ -53,13 +69,50 @@ apply_hardware_boost() {
     alsactl store 0 >/dev/null 2>&1 || true
 }
 
-ensure_wireplumber_levels() {
+release_greeter_alsa() {
+    # Prevent gdm/gdm-greeter PipeWire from holding hw:SurfaceProX,0 open (EBUSY)
+    # when a real desktop user session is logged in.
+    local u uid
     for u in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}'); do
-        local uid
         uid=$(id -u "$u" 2>/dev/null || true)
-        if [ -n "$uid" ] && [ -d "/run/user/$uid" ]; then
+        if [[ "$u" == gdm* ]] || { [ -n "$uid" ] && [ "$uid" -ge 60000 ]; }; then
+            if [ -n "$uid" ] && [ -d "/run/user/$uid" ]; then
+                sudo -u "$u" XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user stop wireplumber pipewire.socket pipewire >/dev/null 2>&1 || true
+            fi
+        fi
+    done
+}
+
+ensure_wireplumber_levels() {
+    local has_real_user=0
+    local u uid
+    for u in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}'); do
+        uid=$(id -u "$u" 2>/dev/null || true)
+        if [ -n "$uid" ] && [ "$uid" -ge 1000 ] && [ "$uid" -lt 60000 ] && [[ "$u" != gdm* ]]; then
+            has_real_user=1
+            break
+        fi
+    done
+
+    if [ "$has_real_user" -eq 1 ]; then
+        release_greeter_alsa
+    fi
+
+    for u in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}'); do
+        uid=$(id -u "$u" 2>/dev/null || true)
+        if [ -z "$uid" ] || [ "$uid" -lt 1000 ] || [ "$uid" -ge 60000 ] || [[ "$u" == gdm* ]]; then
+            continue
+        fi
+        if [ -d "/run/user/$uid" ]; then
             local spk_id
-            spk_id=$(sudo -u "$u" XDG_RUNTIME_DIR="/run/user/$uid" wpctl status 2>/dev/null | grep -iE "Speaker" | grep -oE "[0-9]+" | head -n 1 || true)
+            spk_id=$(sudo -u "$u" XDG_RUNTIME_DIR="/run/user/$uid" wpctl status 2>/dev/null | grep -iE "Speaker|Intern geluid" | grep -oE "[0-9]+" | head -n 1 || true)
+            if [ -z "$spk_id" ]; then
+                # Real desktop user fell back to Dummy Output (e.g. GDM greeter EBUSY race on fast login); restart WirePlumber
+                release_greeter_alsa
+                sudo -u "$u" XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user restart wireplumber >/dev/null 2>&1 || true
+                sleep 1.5
+                spk_id=$(sudo -u "$u" XDG_RUNTIME_DIR="/run/user/$uid" wpctl status 2>/dev/null | grep -iE "Speaker|Intern geluid" | grep -oE "[0-9]+" | head -n 1 || true)
+            fi
             if [ -n "$spk_id" ]; then
                 sudo -u "$u" XDG_RUNTIME_DIR="/run/user/$uid" wpctl set-volume "$spk_id" 1.0 >/dev/null 2>&1 || true
             fi
@@ -84,9 +137,11 @@ do_recovery() {
     fi
 
     # 2. Wait up to 15s for ADSP to reach running state
+    local adsp_state_file
     for _ in $(seq 1 15); do
-        if [ -e /sys/class/remoteproc/remoteproc2/state ] && \
-           [ "$(cat /sys/class/remoteproc/remoteproc2/state 2>/dev/null)" = "running" ]; then
+        adsp_state_file=$(get_adsp_state_path)
+        if [ -n "$adsp_state_file" ] && [ -e "$adsp_state_file" ] && \
+           [ "$(cat "$adsp_state_file" 2>/dev/null)" = "running" ]; then
             break
         fi
         sleep 1
@@ -134,11 +189,15 @@ do_recovery() {
     # 8. Restore ALSA mixer state
     alsactl restore 0 >/dev/null 2>&1 || true
 
-    # 9. Refresh user PipeWire / WirePlumber sessions
+    # 9. Release GDM greeter ALSA lock and refresh real user PipeWire / WirePlumber sessions
+    release_greeter_alsa
     for u in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}'); do
         local uid
         uid=$(id -u "$u" 2>/dev/null || true)
-        if [ -n "$uid" ] && [ -d "/run/user/$uid" ]; then
+        if [ -z "$uid" ] || [ "$uid" -lt 1000 ] || [ "$uid" -ge 60000 ] || [[ "$u" == gdm* ]]; then
+            continue
+        fi
+        if [ -d "/run/user/$uid" ]; then
             sudo -u "$u" XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user restart pipewire wireplumber >/dev/null 2>&1 || true
         fi
     done
@@ -172,6 +231,8 @@ case "${1:-}" in
             if ! check_health; then
                 echo "surface-audio: Anomaly detected; triggering recovery..."
                 do_recovery || true
+            else
+                ensure_wireplumber_levels || true
             fi
             sleep 20
         done

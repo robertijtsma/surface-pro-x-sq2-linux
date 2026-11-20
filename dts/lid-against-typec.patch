@@ -1,0 +1,49 @@
+--- a/sc8180x-surface-pro-x-cam-slpi-typec.dts
++++ b/sc8180x-surface-pro-x-cam-slpi-typec-lid.dts
+@@ -996,7 +996,7 @@
+ 				pinctrl-0 = <0x39 0x3a>;
+ 
+ 				als@39 {
+-					compatible = "avago,apds9960";
++					compatible = "ams,tcs3430";
+ 					reg = <0x39>;
+ 					interrupts-extended = <0x33 0x18 0x08>;
+ 				};
+@@ -2265,6 +2265,14 @@
+ 			gpio-reserved-ranges = <0x00 0x04 0x2f 0x04>;
+ 			phandle = <0x33>;
+ 
++			lid-default-state {
++				pins = "gpio121";
++				function = "gpio";
++				bias-disable;
++				input-enable;
++				phandle = <0xf4>;
++			};
++
+ 			cci0-default-state {
+ 				pins = "gpio17", "gpio18", "gpio19", "gpio20";
+ 				function = "cci_i2c";
+@@ -5283,6 +5291,22 @@
+ 		};
+ 	};
+ 
++	gpio-keys-lid {
++		compatible = "gpio-keys";
++		label = "Lid";
++		pinctrl-names = "default";
++		pinctrl-0 = <0xf4>;
++
++		switch-lid {
++			label = "Lid";
++			gpios = <0x33 0x79 0x01>;
++			linux,input-type = <0x05>;
++			linux,code = <0x00>;
++			wakeup-source;
++			wakeup-event-action = <0x02>;
++		};
++	};
++
+ 	chosen {
+ 	};
+ 

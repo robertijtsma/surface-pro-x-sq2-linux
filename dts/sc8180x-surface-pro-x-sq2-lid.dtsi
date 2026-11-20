@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Microsoft Surface Pro X SQ2 (Qualcomm SC8180X)
+ * Hardware Hall-sensor Lid Switch (SW_LID on TLMM GPIO 121, active-low)
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/gpio-keys.h>
+#include <dt-bindings/input/linux-event-codes.h>
+
+/ {
+	gpio-keys-lid {
+		compatible = "gpio-keys";
+		label = "Lid";
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&lid_default>;
+
+		switch-lid {
+			label = "Lid";
+			gpios = <&tlmm 121 GPIO_ACTIVE_LOW>;
+			linux,input-type = <EV_SW>;
+			linux,code = <SW_LID>;
+			wakeup-source;
+			wakeup-event-action = <EV_ACT_DEASSERTED>;
+		};
+	};
+};
+
+&i2c2 {
+	als@39 {
+		compatible = "ams,tcs3430";
+	};
+};
+
+&tlmm {
+	lid_default: lid-default-state {
+		pins = "gpio121";
+		function = "gpio";
+		bias-disable;
+		input-enable;
+	};
+};

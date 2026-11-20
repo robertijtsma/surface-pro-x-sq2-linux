@@ -64,7 +64,27 @@ class TCS3430:
         self.dev_path = dev_path
         self.fd = None
         self.gain_code = 3  # Start at 64x
-        self.open_sensor()
+        self.iio_lux_path = self._find_iio_lux()
+        if not self.iio_lux_path:
+            self.open_sensor()
+
+    @staticmethod
+    def _find_iio_lux():
+        base = "/sys/bus/iio/devices"
+        if not os.path.isdir(base):
+            return None
+        for d in sorted(os.listdir(base)):
+            np = os.path.join(base, d, "name")
+            lp = os.path.join(base, d, "in_illuminance_input")
+            try:
+                if os.path.exists(np) and os.path.exists(lp):
+                    with open(np, "r") as f:
+                        if f.read().strip() == "spx-tcs3430":
+                            print(f"[TCS3430] Using kernel IIO driver at {lp}")
+                            return lp
+            except Exception:
+                pass
+        return None
 
     def open_sensor(self):
         try:
@@ -112,6 +132,14 @@ class TCS3430:
         return res[0] if res else 0
 
     def read_lux(self):
+        if not getattr(self, "iio_lux_path", None):
+            self.iio_lux_path = self._find_iio_lux()
+        if self.iio_lux_path:
+            try:
+                with open(self.iio_lux_path, "r") as f:
+                    return float(f.read().strip())
+            except Exception:
+                self.iio_lux_path = None
         if self.fd is None:
             self.open_sensor()
             if self.fd is None:

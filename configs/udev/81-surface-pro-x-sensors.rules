@@ -2,4 +2,6 @@
 ACTION=="remove", GOTO="spx_sensors_end"
 SUBSYSTEM=="misc", KERNEL=="fastrpc-sdsp*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="hexagonrpcd-sdsp.service"
 SUBSYSTEM=="misc", KERNEL=="fastrpc-sdsp*", ENV{IIO_SENSOR_PROXY_TYPE}="ssc-accel ssc-compass", ENV{ACCEL_MOUNT_MATRIX}="-1, 0, 0; 0, -1, 0; 0, 0, 1"
+# Keep ams TCS3430 IIO ALS managed by surface-auto-brightness (smooth 33 FPS cubic easing)
+SUBSYSTEM=="iio", ATTR{name}=="spx-tcs3430", ENV{IIO_SENSOR_PROXY_TYPE}=""
 LABEL="spx_sensors_end"

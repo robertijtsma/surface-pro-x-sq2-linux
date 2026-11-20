@@ -12,16 +12,16 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 | **Privacy LEDs (Front & Rear)** | Working | Automatic refcounted `qcom-camss` control (`GPIO 25` front shared by RGB+IR, `GPIO 11` rear) |
 | **850 nm IR Strobe Illuminator** | Working | Automatic hardware `STROBE` pin (`0x3b81`/`0x3b8e..8f`/`0x3005`) on `OV7251` `s_stream` (`patches/0002`) |
 | **Windows Hello IR Face ID** | Working | Howdy (`YuNet` + `SFace`) on GDM, Polkit, `sudo`, `su` (~0.9 s match) via single-thread OpenMP/OpenBLAS wrappers |
-| **Stereo Speakers (`WCD934x` + `WSA8815`) & Mics** | Working | `surface_ldoe14_xob` (LDO14E XOB RPMh rail, avoids VRM TCS hang) + SoundWire sync & 8.5 V Smart Boost |
+| **Stereo Speakers (`WCD934x` + `WSA8815`) & Mics** | Working | `surface_ldoe14_xob` (LDO14E XOB RPMh rail, avoids VRM TCS hang) + `soundwire-qcom` AHB bridge mutex (`patches/0008`) & 8.5 V Smart Boost |
 | **Wi-Fi (`WCN3998` / `ath10k`, 866 Mbps)** | Working | Linux 7.3 `rmtfs.service` QRTR pre-boot drop-in (`daemons/wifi-qrtr/10-modem-preboot.conf`) |
 | **Bluetooth (`WCN3998`)** | Working | Deterministic `btmgmt` public BD_ADDR setup (`daemons/bluetooth/surface-bt-mac.sh`) |
 | **Touchscreen & Slim Pen 2 (IPTS)** | Working | `spi_hid` cold-boot reset/D0 fix (`drivers/spi_hid/`, `patches/0006`) + `iptsd` 3.1.1 calibrated MPP2 thresholds (`configs/iptsd/iptsd.conf`), tilt, pressure, side button, palm rejection |
 | **Slim Pen 2 BLE Auto-Connect** | Experimental | Best-effort BlueZ LE/contact daemons (`daemons/pen/`); core IPTS drawing/hover works independently without BLE |
 | **Display & Adreno 685 GPU** | Working | `eDP` 2880×1920, `msm`/`dispcc-sm8250` A680 GMEM=0, KGSL `a680_hwcg` + `gmu_write` MMIO guard (`patches/0007`), Freedreno/Turnip with `noubwc` (`libcamera/environment.d/99-surface-gpu.conf`) |
 | **USB-C Orientation & DisplayPort Alt Mode** | Working | `surface_typec` (`drivers/surface_typec/`) + `patches/0005` SSAM registry + QMP combo PHY `orientation-switch` & `mdss_dp0`/`mdss_dp1` (`card0-DP-1`/`card0-DP-2`) |
-| **Ambient Light Sensor (`TCS3430`)** | Working | Direct `/dev/i2c-0` `0x39` adaptive brightness daemon (`daemons/display/surface-auto-brightness`) |
+| **Ambient Light Sensor (`TCS3430`)** | Working | Kernel IIO driver `spx_tcs3430` (`drivers/spx_tcs3430/`, `in_illuminance_input`) + adaptive brightness daemon (`daemons/display/surface-auto-brightness`) |
 | **Accelerometer, Compass & Auto-Rotation (`SLPI`)** | Working | `remoteproc_slpi` + FastRPC (`dts/sc8180x-surface-pro-x-sq2-slpi.dtsi`), `hexagonrpcd`, `libssc`, `iio-sensor-proxy` (`LSM6DSO` + `AK0991x`) |
-| **Type Cover, Posture & Lid Handling** | Working | SAM posture daemon (`closed`/`laptop`/`tablet`), eDP blank + lock on close (`daemons/posture/surface-lid-daemon.sh`) |
+| **Type Cover, Posture & Hall-Sensor Lid (`SW_LID`)** | Working | Hardware `gpio-keys-lid` (`SW_LID` on TLMM GPIO 121, `dts/sc8180x-surface-pro-x-sq2-lid.dtsi`) + SAM posture daemon (`daemons/posture/surface-lid-daemon.sh`) |
 | **CPU Power Profiles (`SC8180X`)** | Working | Native UPower/hadess D-Bus `PowerProfiles` manager (`daemons/power/surface-power-profile`) |
 | **Hardware GNSS (`QMI LOC`)** | Working | On-demand QRTR QMI LOC → NMEA Unix socket bridge (`/run/surface-gps.sock`) |
 | **Hardware TPM 2.0 (`QSEE fTPM`)** | Working | `tpm_qcom_qsee` QSEECOM transport (`drivers/tpm_qcom_qsee/`); `/dev/tpm0`, `/dev/tpmrm0`, `tpm-rng-0`, SHA-1/256/384 PCR banks |
@@ -43,9 +43,9 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 ## Repository Layout
 
 ```text
-patches/    Clean Linux v7.3 patches (ov13858, ov7251, camss LEDs/RDI, full SC8180X camss, SSAM Type-C, spi-hid, drm/msm A680)
-dts/        Symbolic SC8180X SQ2 DTSIs (cameras, SLPI, Type-C/DP) + reference diffs
-drivers/    Out-of-tree kernel modules (surface_cam_spmi, surface_ldoe14_xob, tpm_qcom_qsee, surface_typec, spi_hid, surface_ir_sfmt)
+patches/    Clean Linux v7.3 patches (ov13858, ov7251, camss, SSAM Type-C, spi-hid, drm/msm A680, soundwire-qcom)
+dts/        Symbolic SC8180X SQ2 DTSIs (cameras, SLPI, Type-C/DP, SW_LID + TCS3430) + reference diffs
+drivers/    Out-of-tree kernel modules (surface_cam_spmi, surface_ldoe14_xob, tpm_qcom_qsee, surface_typec, spi_hid, spx_tcs3430, surface_ir_sfmt)
 libcamera/  Symmetric DebayerEGL IPA YAMLs, WirePlumber rules, Adreno 685 env configs
 faceid/     Howdy PAM/CLI single-thread wrappers, OV7251 config.ini.example, PAM guide
 scripts/    Camera boot loader, media-ctl topology script, GTK4/Libadwaita camera control panel
