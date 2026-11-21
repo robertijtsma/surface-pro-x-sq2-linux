@@ -1,0 +1,12 @@
+[Unit]
+Description=Surface Slim Pen BLE-LC Host Address & Hardware Accept-List Setup
+After=bluetooth.service surface-bluetooth-mac.service
+Wants=surface-bluetooth-mac.service
+Requires=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/surface-pen-blelc-setup --rearm
+
+[Install]
+WantedBy=bluetooth.target multi-user.target

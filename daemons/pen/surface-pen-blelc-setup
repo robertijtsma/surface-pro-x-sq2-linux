@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""
+Surface Pro X (SQ2 / SC8180X) Surface Pen BLE-LC & Hardware Accept-List Setup.
+
+Implements Microsoft's HID Pen BLE-LC / Seamless Pairing host handshake
+(UsagePage 0xFFF4) and arms the WCN3998 hardware LE Accept-List + Device
+Privacy / IRK Resolving-List via BlueZ + Linux MGMT so Surface Slim Pen 2
+auto-connects natively on charger lift, top-button press, and post-s2idle
+without polling or StartDiscovery().
+
+IMPORTANT: Feature report 0x56 (Host BT Address) is WRITE-ONLY on both the
+Type Cover Slim Pen Charger (045E:09B0) and the SPI-HID Digitizer (045E:0C21).
+Never issue HIDIOCGFEATURE on it (causes spi_hid timeout & hardware reset).
+"""
+
+import argparse
+import fcntl
+import glob
+import os
+import subprocess
+import sys
+import time
+
+import dbus
+
+BLUEZ_SERVICE = "org.bluez"
+OM_IFACE = "org.freedesktop.DBus.ObjectManager"
+ADAPTER_IFACE = "org.bluez.Adapter1"
+DEVICE_IFACE = "org.bluez.Device1"
+PROPS_IFACE = "org.freedesktop.DBus.Properties"
+
+MICROSOFT_VID = 0x045E
+USAGE_PAGE_BLE_LC = 0xFFF4
+
+
+def hidiocsfeature(length: int) -> int:
+    return (3 << 30) | (ord("H") << 8) | 0x06 | (length << 16)
+
+
+def parse_blelc_feature_reports(rdesc: bytes):
+    """
+    Parse a HID Report Descriptor and return UsagePage 0xFFF4 Feature reports:
+      - host_addr_rid: Report ID containing Usage 0x03 (6B Host BT MAC) + Usage 0x09 (1b Type)
+      - cap_rid, cap_mask: Report ID containing Usage 0x10 (Seamless Pair Capable)
+                           and optional Usage 0x22 (Dock/BLE-LC Capable)
+    """
+    i = 0
+    up = 0
+    rid = 0
+    report_size = 0
+    report_count = 0
+    usages = []
+    feat_fields = {}  # rid -> list of (usage_page, usage_or_None, bits)
+
+    n = len(rdesc)
+    while i < n:
+        b = rdesc[i]
+        if b == 0xFE:
+            if i + 2 >= n:
+                break
+            i += 3 + rdesc[i + 1]
+            continue
+        size = b & 0x03
+        if size == 3:
+            size = 4
+        typ = (b >> 2) & 0x03
+        tag = (b >> 4) & 0x0F
+        if i + 1 + size > n:
+            break
+        val = int.from_bytes(rdesc[i + 1 : i + 1 + size], "little") if size else 0
+        i += 1 + size
+
+        if typ == 1:  # Global
+            if tag == 0:
+                up = val
+            elif tag == 7:
+                report_size = val
+            elif tag == 8:
+                rid = val
+            elif tag == 9:
+                report_count = val
+        elif typ == 2:  # Local
+            if tag == 0:
+                usages.append(val)
+        elif typ == 0:  # Main
+            if tag == 11:  # Feature
+                fields = feat_fields.setdefault(rid, [])
+                if usages:
+                    for u in usages:
+                        fields.append((up, u, report_size * report_count))
+                else:
+                    fields.append((up, None, report_size * report_count))
+                usages = []
+            elif tag in (8, 9, 10, 12):
+                usages = []
+
+    host_addr_rid = None
+    cap_rid = None
+    cap_mask = 0
+
+    for f_rid, fields in feat_fields.items():
+        if f_rid == 0:
+            continue
+        blelc_usages = {u for u_page, u, _ in fields if u_page == USAGE_PAGE_BLE_LC and u is not None}
+        total_bits = sum(bits for _, _, bits in fields)
+
+        # Host Bluetooth Address (Usage 0x03 = 48b) + Address Type (Usage 0x09 = 1b) -> 56b (7B)
+        if 0x03 in blelc_usages and 0x09 in blelc_usages and total_bits == 56:
+            host_addr_rid = f_rid
+
+        # Host Seamless Pair Capable (Usage 0x10) [+ optional Usage 0x22] -> 8b (1B)
+        if 0x10 in blelc_usages and total_bits == 8:
+            bit_pos = 0
+            mask = 0
+            for u_page, u, bits in fields:
+                if u_page == USAGE_PAGE_BLE_LC and u in (0x10, 0x22) and bits == 1:
+                    mask |= 1 << bit_pos
+                bit_pos += bits
+            if mask:
+                cap_rid = f_rid
+                cap_mask = mask
+
+    return host_addr_rid, cap_rid, cap_mask
+
+
+def wait_for_bluez_adapter(timeout: float = 10.0):
+    """Wait until BlueZ exposes a powered Adapter1 with a valid non-zero BD_ADDR."""
+    deadline = time.monotonic() + timeout
+    last_err = None
+    while time.monotonic() < deadline:
+        try:
+            bus = dbus.SystemBus()
+            om = dbus.Interface(bus.get_object(BLUEZ_SERVICE, "/"), OM_IFACE)
+            objs = om.GetManagedObjects()
+            for path, ifaces in sorted(objs.items()):
+                adapter = ifaces.get(ADAPTER_IFACE)
+                if not adapter:
+                    continue
+                addr = str(adapter.get("Address", ""))
+                powered = bool(adapter.get("Powered", False))
+                addr_type = str(adapter.get("AddressType", "public")).lower()
+                if addr and addr != "00:00:00:00:00:00" and powered:
+                    hci_idx = 0
+                    base = os.path.basename(str(path))
+                    if base.startswith("hci") and base[3:].isdigit():
+                        hci_idx = int(base[3:])
+                    return bus, str(path), hci_idx, addr, addr_type, objs
+        except Exception as exc:
+            last_err = exc
+        time.sleep(0.25)
+    raise RuntimeError(f"Timed out waiting for powered BlueZ adapter: {last_err}")
+
+
+def is_surface_pen(dev_props: dict, override_mac: str) -> bool:
+    addr = str(dev_props.get("Address", "")).upper()
+    if override_mac:
+        return addr == override_mac.upper()
+    paired = bool(dev_props.get("Paired", False)) or bool(dev_props.get("Bonded", False))
+    if not paired:
+        return False
+    name = (str(dev_props.get("Name", "")) + " " + str(dev_props.get("Alias", ""))).lower()
+    modalias = str(dev_props.get("Modalias", "")).upper()
+    appearance = int(dev_props.get("Appearance", 0))
+    if "surface" in name and "pen" in name:
+        return True
+    if "V045E" in modalias and ("pen" in name or appearance == 0x03C7):
+        return True
+    return False
+
+
+def run_btmgmt(hci_idx: int, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["/usr/bin/btmgmt", "--index", str(hci_idx), *args],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+
+
+def arm_hardware_accept_list(bus, hci_idx: int, objs: dict, rearm: bool) -> int:
+    override_mac = os.environ.get("SURFACE_PEN_MAC", "").strip()
+    count = 0
+    for path, ifaces in sorted(objs.items()):
+        dev = ifaces.get(DEVICE_IFACE)
+        if not dev or not is_surface_pen(dev, override_mac):
+            continue
+
+        mac = str(dev.get("Address", "")).upper()
+        name = str(dev.get("Name", mac))
+        addr_type_str = str(dev.get("AddressType", "random")).lower()
+        mgmt_type = "1" if addr_type_str == "public" else "2"
+        connected = bool(dev.get("Connected", False))
+
+        # Ensure Trusted=True and WakeAllowed=True in BlueZ
+        try:
+            props = dbus.Interface(bus.get_object(BLUEZ_SERVICE, path), PROPS_IFACE)
+            if not bool(dev.get("Trusted", False)):
+                props.Set(DEVICE_IFACE, "Trusted", dbus.Boolean(True))
+            if not bool(dev.get("WakeAllowed", False)):
+                props.Set(DEVICE_IFACE, "WakeAllowed", dbus.Boolean(True))
+        except Exception as exc:
+            print(f"[warn] D-Bus Trusted/WakeAllowed failed for {mac}: {exc}", file=sys.stderr)
+
+        if connected:
+            print(f"[ok] {name} ({mac}) already connected; ensuring auto-connect flags")
+            run_btmgmt(hci_idx, "add-device", "-a", "2", "-t", mgmt_type, mac)
+            run_btmgmt(hci_idx, "set-flags", "-f", "7", "-t", mgmt_type, mac)
+            count += 1
+            continue
+
+        if rearm:
+            run_btmgmt(hci_idx, "del-device", "-t", mgmt_type, mac)
+
+        r_add = run_btmgmt(hci_idx, "add-device", "-a", "2", "-t", mgmt_type, mac)
+        r_flg = run_btmgmt(hci_idx, "set-flags", "-f", "7", "-t", mgmt_type, mac)
+        print(
+            f"[ok] Armed WCN3998 LE Accept-List for {name} ({mac}, type={addr_type_str}, "
+            f"rearm={rearm}): add={r_add.returncode} flags={r_flg.returncode}"
+        )
+        count += 1
+
+    if count == 0:
+        print("[info] No paired Surface Pen found in BlueZ (Accept-List skipped)")
+    return count
+
+
+def sync_blelc_hid_devices(host_addr: str, host_addr_type: str) -> int:
+    mac_le = bytes(int(part, 16) for part in reversed(host_addr.split(":")))
+    addr_type_byte = 0x01 if host_addr_type == "random" else 0x00
+    synced = 0
+
+    for sys_path in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        uevent_path = os.path.join(sys_path, "device", "uevent")
+        rdesc_path = os.path.join(sys_path, "device", "report_descriptor")
+        try:
+            uevent = open(uevent_path, "r", encoding="utf-8", errors="ignore").read()
+            hid_id = ""
+            hid_name = ""
+            for line in uevent.splitlines():
+                if line.startswith("HID_ID="):
+                    hid_id = line.split("=", 1)[1]
+                elif line.startswith("HID_NAME="):
+                    hid_name = line.split("=", 1)[1]
+            parts = hid_id.split(":")
+            if len(parts) != 3 or int(parts[1], 16) != MICROSOFT_VID:
+                continue
+            rdesc = open(rdesc_path, "rb").read()
+        except OSError:
+            continue
+
+        host_addr_rid, cap_rid, cap_mask = parse_blelc_feature_reports(rdesc)
+        if host_addr_rid is None and cap_rid is None:
+            continue
+
+        dev_node = "/dev/" + os.path.basename(sys_path)
+        try:
+            fd = os.open(dev_node, os.O_RDWR | os.O_NONBLOCK)
+        except OSError as exc:
+            print(f"[warn] Cannot open {dev_node} ({hid_name}): {exc}", file=sys.stderr)
+            continue
+
+        try:
+            ops = []
+            if cap_rid is not None:
+                buf = bytearray([cap_rid, cap_mask])
+                fcntl.ioctl(fd, hidiocsfeature(len(buf)), buf)
+                ops.append(f"0x{cap_rid:02x}=0x{cap_mask:02x}")
+            if host_addr_rid is not None:
+                buf = bytearray([host_addr_rid]) + mac_le + bytearray([addr_type_byte])
+                fcntl.ioctl(fd, hidiocsfeature(len(buf)), buf)
+                ops.append(f"0x{host_addr_rid:02x}={host_addr}({host_addr_type})")
+            print(f"[ok] BLE-LC synced {dev_node} ({hid_name} {hid_id}): {', '.join(ops)}")
+            synced += 1
+        except OSError as exc:
+            print(f"[warn] SET_FEATURE failed on {dev_node} ({hid_name}): {exc}", file=sys.stderr)
+        finally:
+            os.close(fd)
+
+    return synced
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Surface Pen BLE-LC & Accept-List setup")
+    parser.add_argument("--hid-only", action="store_true", help="Only sync UsagePage 0xFFF4 HID devices")
+    parser.add_argument("--rearm", action="store_true", help="Force del-device + add-device re-arm (post-s2idle)")
+    parser.add_argument("--timeout", type=float, default=10.0, help="Seconds to wait for powered BlueZ adapter")
+    args = parser.parse_args()
+
+    t0 = time.monotonic()
+    try:
+        bus, _, hci_idx, host_addr, host_addr_type, objs = wait_for_bluez_adapter(args.timeout)
+    except RuntimeError as exc:
+        print(f"[warn] {exc}", file=sys.stderr)
+        return 0 if args.hid_only else 1
+
+    if not args.hid_only:
+        arm_hardware_accept_list(bus, hci_idx, objs, rearm=args.rearm)
+
+    sync_blelc_hid_devices(host_addr, host_addr_type)
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    print(f"[done] surface-pen-blelc-setup completed in {elapsed_ms} ms")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

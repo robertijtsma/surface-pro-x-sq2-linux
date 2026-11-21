@@ -93,8 +93,8 @@ sudo install -m 755 daemons/power/surface-power-profile /usr/local/bin/
 sudo install -m 755 daemons/display/surface-auto-brightness /usr/local/bin/
 sudo install -m 755 daemons/posture/surface-lid-daemon.sh /usr/local/bin/
 sudo install -m 755 daemons/posture/surface-touch-rotate /usr/local/bin/
-sudo install -m 755 daemons/pen/surface-pen-ble-listener /usr/local/bin/
-sudo install -m 755 daemons/pen/surface-pen-bluetooth-autoconnect /usr/local/bin/
+sudo install -m 755 daemons/pen/surface-pen-blelc-setup /usr/local/bin/
+sudo install -m 755 systemd/system-sleep/surface-pen.sh /usr/lib/systemd/system-sleep/
 
 sudo cp configs/udev/*.rules /etc/udev/rules.d/
 sudo cp configs/iptsd/iptsd.conf /etc/iptsd.conf
@@ -103,9 +103,10 @@ sudo cp configs/systemd/surface-s2idle.conf /etc/systemd/sleep.conf.d/
 sudo cp configs/systemd/surface-lid.conf /etc/systemd/logind.conf.d/
 sudo cp systemd/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
+sudo udevadm control --reload-rules
 ```
 
-Enable the services you want (`surface-audio-boot-sync.service`, `surface-bluetooth-mac.service`, `surface-power-profile.service`, `surface-lid-daemon.service`, `surface-qmi-gps.service`, and optionally the experimental pen BLE daemons).
+Enable the services you want (`surface-audio-boot-sync.service`, `surface-bluetooth-mac.service`, `surface-pen-blelc.service`, `surface-power-profile.service`, `surface-lid-daemon.service`, `surface-qmi-gps.service`). Keep the legacy `surface-pen-ble-listener.service` and `surface-pen-bluetooth-autoconnect.service` disabled: `StartDiscovery()` and blocking `Device1.Connect()` interfere with WCN3998's native hardware LE Accept-List passive scan.
 
 ## 6. SLPI Sensor Hub (Accelerometer, Compass & Auto-Rotation)
 

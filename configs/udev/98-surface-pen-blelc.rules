@@ -1,0 +1,2 @@
+# Surface Pro X Type Cover Slim Pen Charger (045E:09B0) BLE-LC host-MAC sync on hotplug
+ACTION=="add", SUBSYSTEM=="hidraw", SUBSYSTEMS=="hid", ATTRS{id/vendor}=="045e", ATTRS{id/product}=="09b0", RUN+="/usr/bin/systemd-run --no-block --collect --on-active=1s --description='Surface Pen Charger BLE-LC hotplug sync' /usr/local/bin/surface-pen-blelc-setup --hid-only"
