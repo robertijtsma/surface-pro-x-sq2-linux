@@ -40,7 +40,7 @@ Verified after a clean cold boot followed by closing and reopening the Type Cove
   - Internal eDP display + Adreno 685 GPU (GNOME desktop thaws immediately)
   - Touchscreen & Slim Pen 2 (`IPTSD Virtual Touchscreen` / `Stylus` recreated ~530 ms after resume, live touch verified)
   - Type Cover keyboard, touchpad & Hall-sensor lid wake
-  - Wi-Fi (`WCN3998`, `wlan0 UP`) & Bluetooth
+  - Wi-Fi (`WCN3998`, `wlan0 UP`) & Bluetooth (`Privacy = device` + WCN3998 hardware `ll-privacy`/Accept-List persists across `s2idle`; Slim Pen 2 auto-connects natively post-resume without scanning)
   - 4G LTE (`Snapdragon X24` + `IPA v4.1`: `ModemManager` remains `registered` on `lte`, `PS: attached`)
   - Stereo speakers (`WCD934x` + `WSA8815`) & microphones
   - All 3 cameras (`OV5693`, `OV13858`, `OV7251`) & Howdy IR Face ID

@@ -108,6 +108,8 @@ sudo udevadm control --reload-rules
 
 Enable the services you want (`surface-audio-boot-sync.service`, `surface-bluetooth-mac.service`, `surface-pen-blelc.service`, `surface-power-profile.service`, `surface-lid-daemon.service`, `surface-qmi-gps.service`). Keep the legacy `surface-pen-ble-listener.service` and `surface-pen-bluetooth-autoconnect.service` disabled: `StartDiscovery()` and blocking `Device1.Connect()` interfere with WCN3998's native hardware LE Accept-List passive scan.
 
+For **native Surface Slim Pen 2 auto-reconnect** (1× top-button click, Type Cover charger lift, post-`s2idle`, and cold boot — fixing `linux-surface/linux-surface#1656`), merge [`configs/bluetooth/main.conf.snippet`](../configs/bluetooth/main.conf.snippet) (`Privacy = device`, `FastConnectable = true`, `AutoEnable = true`) into `/etc/bluetooth/main.conf`, restart `bluetooth.service`, and re-pair the Slim Pen 2 **once** so BlueZ distributes its Local IRK during SMP bonding. See [`docs/SLIM_PEN_2_BLUETOOTH.md`](SLIM_PEN_2_BLUETOOTH.md) for the full step-by-step pairing flow and firmware details.
+
 ## 6. SLPI Sensor Hub (Accelerometer, Compass & Auto-Rotation)
 
 The LSM6DSO 6-axis IMU and AK0991x magnetometer are attached to the Qualcomm SLPI DSP (`remoteproc@2400000`). Bringing them up requires the device's `qcslpi8180.mbn` firmware and OEM sensor registry JSONs from Windows (or fetched from Windows Update with `wudrivers`), plus [`hexagonrpcd`](https://github.com/linux-msm/hexagonrpc), `libssc`, and `iio-sensor-proxy`.

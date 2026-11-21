@@ -1,0 +1,14 @@
+# BlueZ /etc/bluetooth/main.conf snippet for Surface Slim Pen 2 auto-connect
+#
+# Merge these keys into the corresponding sections of /etc/bluetooth/main.conf,
+# restart bluetooth.service, and re-pair the Surface Slim Pen 2 ONCE so BlueZ
+# distributes its Local IRK (kdist_peer.id = 1) during SMP bonding.
+#
+# See docs/SLIM_PEN_2_BLUETOOTH.md for full technical details.
+
+[General]
+FastConnectable = true
+Privacy = device
+
+[Policy]
+AutoEnable = true
