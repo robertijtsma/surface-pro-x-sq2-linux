@@ -23,9 +23,10 @@ On default Linux BlueZ installations, `/etc/bluetooth/main.conf` defaults to `Pr
    - Sends **write-only** `HIDIOCSFEATURE` (`0x70` + `0x56`) to both the Type Cover Slim Pen Charger (`045E:09B0`, activating live NFC `0x6E`/`0x14`/`0x5C` reports) and the SPI-HID digitizer (`045E:0C21`).
    - **Never** calls `HIDIOCGFEATURE` (`GET_FEATURE`) on report `0x56`: report `0x56` is write-only on `045E:0C21`, and reading it triggers a `spi_hid` timeout and hardware reset.
    - Sets BlueZ `Trusted = true` and `WakeAllowed = true`, and arms the WCN3998 hardware LE Accept-List (`btmgmt add-device -a 2`, `set-flags -f 7`) so the controller passively listens and connects in <1 s with `Discovering: no`.
-3. **Boot, Hotplug & `s2idle` Hooks**:
+3. **Boot, Hotplug, Input Hygiene & `s2idle` Hooks**:
    - [`systemd/surface-pen-blelc.service`](../systemd/surface-pen-blelc.service): runs `surface-pen-blelc-setup --rearm` after `bluetooth.service` and `surface-bluetooth-mac.service` (~300 ms, no ordering cycle with `surface-iptsd.service`).
    - [`configs/udev/98-surface-pen-blelc.rules`](../configs/udev/98-surface-pen-blelc.rules): re-syncs the Type Cover charger (`045E:09B0`) via `--hid-only` whenever the keyboard is detached and reattached.
+   - [`configs/udev/99-surface-input-clean.rules`](../configs/udev/99-surface-input-clean.rules): sets `LIBINPUT_IGNORE_DEVICE="1"` on the dummy Bluetooth evdev nodes (`Surface Slim Pen 2 Pen` and `Surface Slim Pen 2`), preventing GNOME/Mutter 51 `SIGSEGV` crashes in `meta_wayland_tablet_tool_set_focus()` when BLE sleep/wake hotplugs coincide with `iptsd` stylus contact — while keeping `Surface Slim Pen 2 Keyboard` (`Super+F20`) and `/dev/hidraw*` (`UsagePage 0x0E` Simple Haptics Controller) fully active.
    - [`systemd/system-sleep/surface-pen.sh`](../systemd/system-sleep/surface-pen.sh): schedules a non-blocking `systemd-run --on-active=2s` `--rearm` after `s2idle` resume.
 
 ## Setup Instructions

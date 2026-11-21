@@ -2,11 +2,14 @@
 Description=Qualcomm SLPI (SDSP) FastRPC Sensor Filesystem Server
 ConditionPathExists=/dev/fastrpc-sdsp
 After=local-fs.target systemd-udevd.service
+Before=shutdown.target reboot.target halt.target
+Conflicts=shutdown.target reboot.target halt.target
 
 [Service]
 ExecStart=/usr/local/bin/hexagonrpcd -f /dev/fastrpc-sdsp -d sdsp -s -R /usr/share/qcom/sc8180x/microsoft/surface-pro-x
 Restart=on-failure
 RestartSec=3
+TimeoutStopSec=3
 
 [Install]
 WantedBy=multi-user.target

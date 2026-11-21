@@ -1607,6 +1607,21 @@ err_sleep:
 
 static SIMPLE_DEV_PM_OPS(spi_hid_pm_ops, spi_hid_suspend, spi_hid_resume);
 
+static void spi_hid_shutdown(struct spi_device *spi)
+{
+#ifdef CONFIG_PM_SLEEP
+	spi_hid_suspend(&spi->dev);
+#else
+	struct spi_hid *shid = spi_get_drvdata(spi);
+
+	if (shid->irq_enabled) {
+		disable_irq(spi->irq);
+		shid->irq_enabled = false;
+	}
+	spi_hid_power_down(shid);
+#endif
+}
+
 static const struct spi_device_id spi_hid_id_table[] = {
 	{ "hid", 0 },
 	{ "hid-over-spi", 0 },
@@ -1623,6 +1638,7 @@ static struct spi_driver spi_hid_driver = {
 	},
 	.probe		= spi_hid_probe,
 	.remove		= spi_hid_remove,
+	.shutdown	= spi_hid_shutdown,
 	.id_table	= spi_hid_id_table,
 };
 

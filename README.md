@@ -70,11 +70,12 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 patches/    Clean Linux v7.3 patches (ov13858, ov7251, camss, SSAM Type-C, spi-hid, drm/msm A680, soundwire-qcom, videocc-sm8150, venus-sq2, ipa-v4.1, s2idle PM)
 dts/        Symbolic SC8180X SQ2 DTSIs (cameras, SLPI, Type-C/DP, SW_LID + TCS3430, Venus VIDEOCC, IPA v4.1) + reference diffs
 drivers/    Out-of-tree kernel modules (surface_cam_spmi, surface_ldoe14_xob, tpm_qcom_qsee, surface_typec, spi_hid, spx_tcs3430, surface_ir_sfmt, sq2_venus_overlay, sq2_fsg_read)
+dkms/       Unified DKMS config & Makefile auto-rebuilding all 7 standalone SQ2 modules on kernel upgrades
 libcamera/  Symmetric DebayerEGL IPA YAMLs, WirePlumber rules, Adreno 685 env configs
 faceid/     Howdy PAM/CLI single-thread wrappers, OV7251 config.ini.example, PAM guide
-scripts/    Camera, Venus & LTE boot loaders, media-ctl topology script, GTK4/Libadwaita camera control panel
+scripts/    DKMS & in-tree kernel builders, Camera/Venus/LTE boot loaders, media-ctl topology script, GTK4/Libadwaita camera control panel
 daemons/    Wi-Fi QRTR drop-in, audio sync, BT MAC, power profiles, ALS, lid/posture, pen, GPS
-configs/    udev rules, modprobe blacklists, iptsd.conf, systemd sleep/logind configs, smart-osk GNOME extension
+configs/    udev rules, modprobe blacklists, iptsd.conf, BlueZ Privacy snippet, mpv V4L2 M2M config, systemd sleep/logind configs, smart-osk GNOME extension
 systemd/    Systemd service units, drop-ins (ModemManager, iio-sensor-proxy), and system-sleep hooks
 docs/       Hardware reference notes & build/installation guide
 ```

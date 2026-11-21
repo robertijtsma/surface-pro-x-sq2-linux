@@ -1,10 +1,9 @@
 obj-m += sq2_venus_overlay.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
-PWD  := $(shell pwd)
 
 all: overlay.h
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
 
 overlay.dtbo: overlay.dts
 	dtc -I dts -O dtb -o $@ $<
@@ -17,5 +16,5 @@ install: all
 	depmod -a
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
+	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
 	rm -f overlay.dtbo overlay.h

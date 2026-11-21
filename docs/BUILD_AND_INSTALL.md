@@ -22,7 +22,24 @@ git apply patches/0002-media-i2c-ov7251-continuous-clk-and-ir-strobe.patch
 git apply patches/0004-media-qcom-camss-sc8180x-titan175-full.patch
 ```
 
-### Out-of-Tree Helper Modules
+### Out-of-Tree Helper Modules (Automated via DKMS)
+
+All 7 standalone out-of-tree modules (`spi-hid`, `spx_tcs3430`, `sq2_venus_overlay`, `surface_cam_spmi`, `surface_ldoe14_xob`, `surface_typec`, `tpm_qcom_qsee`) can be registered once with **DKMS** so future kernel upgrades automatically rebuild and install them into `/lib/modules/<kver>/updates/dkms/`:
+
+```bash
+sudo pacman -S --needed dkms
+sudo ./scripts/install-sq2-dkms.sh
+sudo cp configs/modules-load.d/surface-tpm.conf /etc/modules-load.d/
+```
+
+For rebuilding all patched in-tree kernel modules (`patches/0001..0014`) against a new Linux kernel source tree in one command:
+
+```bash
+./scripts/build-sq2-kernel-modules.sh /path/to/linux-source-tree --install
+# Pass --vanilla-camss if your tree does not already carry SM8150/SC8180X CAMSS.
+```
+
+Or build individual out-of-tree modules manually:
 
 ```bash
 # PMC8180-A camera SPMI LDO rails (1.8V / 2.856V / 1.2V)

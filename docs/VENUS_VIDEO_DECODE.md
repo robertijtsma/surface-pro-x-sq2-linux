@@ -46,4 +46,4 @@ Verified on live SQ2 hardware across 11 consecutive decode sessions on cold boot
 ## Limitations
 
 - **EL1 PAS 9 one-shot lifecycle**: Qualcomm TrustZone PAS 9 permits a single Venus firmware start per boot; `venus-core` intentionally keeps the firmware resident until reboot and disables automatic firmware restart on fatal errors (`sq2_no_tz=1` EL2 suspend/resume requires booting Linux at EL2).
-- **VA-API**: Venus exposes standard Linux **V4L2 M2M** (used by GStreamer `v4l2*dec`, FFmpeg `*_v4l2m2m`, `mpv --hwdec=v4l2m2m-copy`, etc.), not VA-API; `LIBVA_DRIVER_NAME=none` remains set for desktop stability.
+- **VA-API / Browsers**: Venus exposes standard Linux **V4L2 M2M** (used by GStreamer `v4l2*dec`, FFmpeg `*_v4l2m2m`, and `mpv` via [`configs/mpv/mpv.conf`](../configs/mpv/mpv.conf)), not VA-API; `LIBVA_DRIVER_NAME=none` remains set for desktop stability. Firefox/Zen's `gfxtest v4l2` probes `/dev/video16` cleanly (`V4L2_SUPPORTED=TRUE` for `H264`/`HEVC`/`VP9`/`VP8`/`MPG2`) and initializes `h264_v4l2m2m`, but falls back to software until FFmpeg's V4L2-M2M wrapper outputs `AV_PIX_FMT_DRM_PRIME` frames.

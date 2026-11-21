@@ -2,12 +2,15 @@
 Description=Surface Pro X IPTS Touchscreen & Slim Pen Daemon
 After=systemd-logind.service multi-user.target
 Wants=systemd-logind.service
+Before=shutdown.target reboot.target halt.target
+Conflicts=shutdown.target reboot.target halt.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/start-surface-iptsd.sh
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=3
 
 [Install]
 WantedBy=multi-user.target
