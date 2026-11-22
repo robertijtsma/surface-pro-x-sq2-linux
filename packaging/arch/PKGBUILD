@@ -1,6 +1,6 @@
 # Maintainer: robertijtsma <37256770+robertijtsma@users.noreply.github.com>
 pkgname=surface-pro-x-sq2-support
-pkgver=1.8.0
+pkgver=1.8.1
 pkgrel=1
 pkgdesc="Complete Linux hardware enablement (DKMS modules, daemons, udev, systemd, Slim Pen 2 haptics & hover dot) for Microsoft Surface Pro X SQ2 (SC8180X)"
 arch=('aarch64')
@@ -37,11 +37,11 @@ package() {
   repo_root="$(cd "${startdir}/../.." && pwd)"
   dkms_dest="${pkgdir}/usr/src/surface-pro-x-sq2-${pkgver}"
 
-  # 1. Stage 8 DKMS kernel modules
+  # 1. Stage 7 DKMS kernel modules
   install -dm755 "${dkms_dest}"
   install -Dm644 "${repo_root}/dkms/dkms.conf" "${dkms_dest}/dkms.conf"
   install -Dm644 "${repo_root}/dkms/Makefile" "${dkms_dest}/Makefile"
-  for mod in spi_hid spx_tcs3430 sq2_s2idle_pm sq2_venus_overlay surface_cam_spmi surface_ldoe14_xob surface_typec tpm_qcom_qsee; do
+  for mod in spi_hid spx_tcs3430 sq2_venus_overlay surface_cam_spmi surface_ldoe14_xob surface_typec tpm_qcom_qsee; do
     cp -a "${repo_root}/drivers/${mod}" "${dkms_dest}/${mod}"
   done
 

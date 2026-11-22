@@ -26,7 +26,7 @@ jobs:
           STAGE="surface-pro-x-sq2-${VER}"
           mkdir -p "${STAGE}"
           cp dkms/dkms.conf dkms/Makefile LICENSE README.md "${STAGE}/"
-          for mod in spi_hid spx_tcs3430 sq2_s2idle_pm sq2_venus_overlay surface_cam_spmi surface_ldoe14_xob surface_typec tpm_qcom_qsee; do
+          for mod in spi_hid spx_tcs3430 sq2_venus_overlay surface_cam_spmi surface_ldoe14_xob surface_typec tpm_qcom_qsee; do
             cp -a "drivers/${mod}" "${STAGE}/${mod}"
           done
           tar -czf "${STAGE}-dkms-src.tar.gz" "${STAGE}"

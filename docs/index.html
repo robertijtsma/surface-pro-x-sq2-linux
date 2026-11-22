@@ -153,7 +153,7 @@
       <img class="hero-banner" src="assets/banner.svg" alt="Surface Pro X SQ2 Linux 7.3 ARM64 Enablement Banner" />
       <div class="hero-actions">
         <a class="btn btn-primary" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux">View Repository on GitHub</a>
-        <a class="btn btn-secondary" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux/releases/latest">Download Release v1.8.0</a>
+        <a class="btn btn-secondary" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux/releases/latest">Download Release v1.8.1</a>
         <a class="btn btn-secondary" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux/blob/main/docs/SQ1_VS_SQ2.md">SQ1 vs. SQ2 Guide</a>
       </div>
       <div class="stats">
@@ -166,7 +166,7 @@
           <div class="stat-label">Clean Linux 7.3 In-Tree Patches</div>
         </div>
         <div class="stat-card">
-          <div class="stat-num">8</div>
+          <div class="stat-num">7</div>
           <div class="stat-label">Auto-Rebuilding DKMS Modules</div>
         </div>
         <div class="stat-card">
@@ -201,8 +201,8 @@
           <p>2880×1920 eDP, Adreno 685 GMEM/HWCG/MMIO fixes, and <code>surface_typec</code> SAM PD integration driving QMP combo PHY orientation switching and external monitors on <code>DP-1</code> &amp; <code>DP-2</code>.</p>
         </div>
         <div class="card">
-          <div class="card-head"><span class="card-title">s2idle Deep Sleep, RPMh PM &amp; Clean Shutdown</span><span class="pill">VERIFIED</span></div>
-          <p>~0.9 s suspend / ~1.2 s resume with Hall-sensor lid &amp; power-button wake, <code>sq2_s2idle_pm</code> RPMh sleep-set retention &amp; <code>ACTIVE_ONLY</code> interconnects, and clean Venus/IPA pre-shutdown teardown.</p>
+          <div class="card-head"><span class="card-title">s2idle Deep Sleep &amp; Clean Shutdown</span><span class="pill">VERIFIED</span></div>
+          <p>~0.9 s suspend / ~1.2 s resume with Hall-sensor lid &amp; power-button wake, non-blocking <code>systemd/system-sleep</code> hooks, <code>spx_tcs3430</code> PM, and clean Venus/IPA pre-shutdown teardown.</p>
         </div>
         <div class="card">
           <div class="card-head"><span class="card-title">Stereo Speakers, WCN3998 Wi-Fi &amp; BT</span><span class="pill">VERIFIED</span></div>
@@ -217,7 +217,7 @@
 
     <section id="install">
       <h2>Quick Install (Arch Linux ARM64)</h2>
-      <p class="subtitle">Install the 8 DKMS kernel modules and full user-space stack directly, or build a native <code>pacman</code> package with <code>makepkg</code>.</p>
+      <p class="subtitle">Install the 7 DKMS kernel modules and full user-space stack directly, or build a native <code>pacman</code> package with <code>makepkg</code>.</p>
       <div class="code-box">
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         <pre>git clone https://github.com/robertijtsma/surface-pro-x-sq2-linux.git
@@ -270,11 +270,11 @@ cd packaging/arch &amp;&amp; makepkg -si
           <span>Iris1 / HFI4 port to Linux 7.3, EL1 PAS 9 &amp; bit-exact SHA-256 results</span>
         </a>
         <a class="doc-link" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux/blob/main/docs/S2IDLE_SUSPEND.md">
-          <strong>s2idle Deep Sleep &amp; RPMh Notes</strong>
-          <span>DPU/DP resume, EL1 Venus TZ PM, spi-hid PM &amp; sq2_s2idle_pm sleep-set tuning</span>
+          <strong>s2idle Deep Sleep &amp; PM Notes</strong>
+          <span>DPU/DP resume, EL1 Venus TZ PM, spi-hid PM, systemd hooks &amp; RPMh findings</span>
         </a>
         <a class="doc-link" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux/blob/main/CHANGELOG.md">
-          <strong>Release Changelog (v1.0.0 – v1.8.0)</strong>
+          <strong>Release Changelog (v1.0.0 – v1.8.1)</strong>
           <span>Complete timeline of hardware enablement milestones</span>
         </a>
       </div>

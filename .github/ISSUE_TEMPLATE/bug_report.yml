@@ -27,7 +27,7 @@ body:
         - Audio (WCD934x / WSA8815 / surface_ldoe14_xob)
         - Wi-Fi / Bluetooth (WCN3998 / QRTR)
         - Sensors (SLPI IMU / TCS3430 ALS / Hall-Sensor Lid)
-        - S2idle Suspend & Resume / sq2_s2idle_pm
+        - S2idle Suspend & Resume
         - Hardware TPM 2.0 (tpm_qcom_qsee)
         - Hardware GNSS / GPS
     validations:

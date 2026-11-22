@@ -71,7 +71,7 @@
     <text x="392" y="378" fill="#79c0ff">rmnet_ipa0 &amp; ModemManager active</text>
 
     <text x="22" y="400" fill="#8b949e">  [</text><text x="46" y="400" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="400" fill="#8b949e">]</text>
-    <text x="94" y="400" fill="#e6edf3">15. S2idle RPMh PM &amp; Shutdown</text>
-    <text x="392" y="400" fill="#79c0ff">sq2_s2idle_pm loaded + pre-shutdown enabled</text>
+    <text x="94" y="400" fill="#e6edf3">15. S2idle Suspend &amp; Shutdown</text>
+    <text x="392" y="400" fill="#79c0ff">mem_sleep=s2idle + pre-shutdown enabled</text>
   </g>
 </svg>

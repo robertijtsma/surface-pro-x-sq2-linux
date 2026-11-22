@@ -2,7 +2,16 @@
 
 All notable hardware enablement milestones for **Surface Pro X SQ2 (`SC8180X` / Linux 7.3 ARM64)** are documented in this file.
 
-## [v1.8.0] — Surface Slim Pen 2 Tactile Haptics (`0x0E`), White Hover Dot, RPMh Deep Sleep & Arch Packaging
+## [v1.8.1] — Critical Hotfix: Remove Broken `sq2_s2idle_pm` Module
+
+### Removed / Fixed
+- **Removed `drivers/sq2_s2idle_pm/` and `configs/modules-load.d/surface-s2idle-pm.conf` completely** (returning DKMS and `PKGBUILD` to the **7** verified stable modules):
+  - **Root cause**: On Qualcomm SC8180X, RPMh enters the `SLEEP` TCS during ordinary CPUidle cluster sleep between interrupts (not only during `s2idle`). Forcing `QCOM_ICC_TAG_ACTIVE_ONLY` (`tag = 3`) across all non-display interconnects at boot starved QUP/GENI clocks mid-transfer, causing `-110` (`ETIMEDOUT`) storms across `884000.spi` (touchscreen), `c8c000.serial` (WCN3998 Bluetooth), and `c94000.serial` (SSAM keyboard/battery `ADP1`), `D`-state hangs in `gnome-shell`/`systemd-logind` (black screen on boot across all boot entries), and broken `s2idle` wake.
+  - `scripts/install-sq2-dkms.sh` now automatically removes any legacy `1.8.0` DKMS registration, `sq2_s2idle_pm.ko`, and `/etc/modules-load.d/surface-s2idle-pm.conf`.
+  - `scripts/surface-sq2-diag.sh` now validates `mem_sleep=s2idle` + `surface-pre-shutdown.service` and explicitly warns if deprecated `sq2_s2idle_pm` is still loaded.
+  - Kept the verified-safe `spx_tcs3430` `DEFINE_SIMPLE_DEV_PM_OPS` suspend/resume callbacks and `1.5 s` `surface-auto-brightness` polling interval.
+
+## [v1.8.0] — Surface Slim Pen 2 Tactile Haptics (`0x0E`), White Hover Dot & Arch Packaging *(superseded by v1.8.1)*
 
 ### Added
 - **Surface Slim Pen 2 Real-Time Tactile Haptics (`UsagePage 0x0E`)**:

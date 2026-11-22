@@ -108,8 +108,10 @@ else
 fi
 
 # 15. S2idle Deep Sleep & Pre-Shutdown Teardown
-if has_mod sq2_s2idle_pm && systemctl is-enabled --quiet surface-pre-shutdown.service 2>/dev/null; then
-    ok "15. S2idle RPMh PM & Shutdown" "sq2_s2idle_pm loaded + surface-pre-shutdown enabled"
+if has_mod sq2_s2idle_pm; then
+    warn "15. S2idle Suspend & Shutdown" "DEPRECATED sq2_s2idle_pm is loaded — remove it (causes GENI/SPI/BT -110 hangs)!"
+elif grep -q s2idle /sys/power/mem_sleep 2>/dev/null && systemctl is-enabled --quiet surface-pre-shutdown.service 2>/dev/null; then
+    ok "15. S2idle Suspend & Shutdown" "mem_sleep=s2idle + surface-pre-shutdown enabled"
 else
-    warn "15. S2idle RPMh PM & Shutdown" "sq2_s2idle_pm or surface-pre-shutdown missing"
+    warn "15. S2idle Suspend & Shutdown" "s2idle or surface-pre-shutdown.service not configured"
 fi

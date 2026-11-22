@@ -4,7 +4,6 @@ KDIR ?= /lib/modules/$(KERNELRELEASE)/build
 SUBDIRS := \
 	spi_hid \
 	spx_tcs3430 \
-	sq2_s2idle_pm \
 	sq2_venus_overlay \
 	surface_cam_spmi \
 	surface_ldoe14_xob \

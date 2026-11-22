@@ -35,7 +35,7 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 | **Hardware TPM 2.0 (`QSEE fTPM`)** | Working | `tpm_qcom_qsee` QSEECOM transport (`drivers/tpm_qcom_qsee/`); `/dev/tpm0`, `/dev/tpmrm0`, `tpm-rng-0`, SHA-1/256/384 PCR banks |
 | **Hardware Video Decode (`Venus` / Iris1)** | Working | `videocc-sm8150` (`patches/0009`) + `sq2_venus_overlay` (`drivers/sq2_venus_overlay/`) + Linux 7.3 SQ2 HFI4 `venus-{core,dec}` (`patches/0010`); V4L2 M2M bit-exact 4K H.264 / 4K HEVC / 1080p VP9 (GStreamer & FFmpeg) via EL1 PAS 9 |
 | **4G LTE Cellular Modem (`Snapdragon X24` / `IPA v4.1`)** | Working | Qualcomm `IPA v4.1` (`patches/0011`) + `dts/sc8180x-surface-pro-x-sq2-ipa.dtsi` (`rmnet_ipa0` `MAPv4`) + read-only Linux EL1 SCM `modem_fsg` extractor (`drivers/sq2_fsg_read/`) + `ModemManager` (`qcom-soc`, `qrtr0`, SIM/eSIM, `qmapmux0.0`) |
-| **Suspend (`S2idle`)** | Working | `patches/0012..0014` (`drm/msm` DPU/DP resume, Venus EL1 TZ `qcom_pas_set_remote_state` PM, `spi-hid` `SIMPLE_DEV_PM_OPS`) + `sq2_s2idle_pm` (`drivers/sq2_s2idle_pm/`, RPMh `SLEEP` set retention & `QCOM_ICC_TAG_ACTIVE_ONLY`) + `systemd/system-sleep/` hooks + `ModemManager --test-quick-suspend-resume`; Hall-sensor lid & power-button wake (~0.9 s suspend / ~1.2 s resume) |
+| **Suspend (`S2idle`)** | Working | `patches/0012..0014` (`drm/msm` DPU/DP resume, Venus EL1 TZ `qcom_pas_set_remote_state` PM, `spi-hid` `SIMPLE_DEV_PM_OPS`) + `spx_tcs3430` PM + `systemd/system-sleep/` hooks + `ModemManager --test-quick-suspend-resume`; Hall-sensor lid & power-button wake (~0.9 s suspend / ~1.2 s resume) |
 
 ## Upstream `linux-surface/surface-pro-x` Issues Addressed
 
@@ -97,7 +97,7 @@ See the full step-by-step [Build & Installation Guide](docs/BUILD_AND_INSTALL.md
 flowchart LR
     subgraph APSS["Qualcomm SC8180X APSS (Linux 7.3 EL1)"]
         K["In-Tree Patches (0001..0014)<br/>CAMSS · Venus · IPA v4.1 · drm/msm · spi-hid · SoundWire"]
-        D["8 DKMS Modules<br/>spi-hid · surface_cam_spmi · surface_ldoe14_xob<br/>surface_typec · tpm_qcom_qsee · spx_tcs3430<br/>sq2_venus_overlay · sq2_s2idle_pm"]
+        D["7 DKMS Modules<br/>spi-hid · surface_cam_spmi · surface_ldoe14_xob<br/>surface_typec · tpm_qcom_qsee · spx_tcs3430<br/>sq2_venus_overlay"]
         U["User-Space Stack<br/>libcamera GPU SoftISP · Howdy IR Face ID<br/>iptsd · surface-pen-haptics (0x0E) · Hover Dot<br/>surface-auto-brightness · ModemManager"]
     end
 
@@ -119,8 +119,8 @@ flowchart LR
 ```text
 patches/    Clean Linux v7.3 patches (ov13858, ov7251, camss, SSAM Type-C, spi-hid, drm/msm A680, soundwire-qcom, videocc-sm8150, venus-sq2, ipa-v4.1, s2idle PM)
 dts/        Symbolic SC8180X SQ2 DTSIs (cameras, SLPI, Type-C/DP, SW_LID + TCS3430, Venus VIDEOCC, IPA v4.1) + reference diffs
-drivers/    Out-of-tree kernel modules (surface_cam_spmi, surface_ldoe14_xob, tpm_qcom_qsee, surface_typec, spi_hid, spx_tcs3430, surface_ir_sfmt, sq2_venus_overlay, sq2_fsg_read, sq2_s2idle_pm)
-dkms/       Unified DKMS config & Makefile auto-rebuilding all 8 standalone SQ2 modules on kernel upgrades
+drivers/    Out-of-tree kernel modules (surface_cam_spmi, surface_ldoe14_xob, tpm_qcom_qsee, surface_typec, spi_hid, spx_tcs3430, surface_ir_sfmt, sq2_venus_overlay, sq2_fsg_read)
+dkms/       Unified DKMS config & Makefile auto-rebuilding all 7 standalone SQ2 modules on kernel upgrades
 packaging/  Native Arch Linux ARM (aarch64) PKGBUILD for the full SQ2 DKMS + user-space stack
 libcamera/  Symmetric DebayerEGL IPA YAMLs, WirePlumber rules, Adreno 685 env configs
 faceid/     Howdy PAM/CLI single-thread wrappers, OV7251 config.ini.example, PAM guide
@@ -139,11 +139,11 @@ docs/       Hardware reference notes & build/installation guide
 - [Camera Hardware Notes (CSIPHY, SMMU, SPMI, Titan 175, DebayerEGL)](docs/CAMERA_HARDWARE.md)
 - [Venus 4K Hardware Video Decode Notes (Iris1, HFI4, EL1 PAS 9)](docs/VENUS_VIDEO_DECODE.md)
 - [Snapdragon X24 4G LTE & IPA v4.1 Notes (EL1 SCM FSG, QMAP)](docs/LTE_MODEM_IPA.md)
-- [S2idle Deep Sleep Notes (EL1 Venus TZ PM, `spi-hid`, DPU/DP, `sq2_s2idle_pm`, `systemd` hooks)](docs/S2IDLE_SUSPEND.md)
+- [S2idle Deep Sleep Notes (EL1 Venus TZ PM, `spi-hid`, DPU/DP, `spx_tcs3430` PM, `systemd` hooks)](docs/S2IDLE_SUSPEND.md)
 - [Surface Slim Pen 2 Bluetooth Auto-Connect, Tactile Haptics (`0x0E`) & White Hover Dot Notes](docs/SLIM_PEN_2_BLUETOOTH.md)
 - [Build & Installation Guide](docs/BUILD_AND_INSTALL.md)
 - [Howdy IR Face ID Setup](faceid/README.md)
-- [Changelog (`v1.0.0` – `v1.8.0`)](CHANGELOG.md) & [Contributing Guide](CONTRIBUTING.md)
+- [Changelog (`v1.0.0` – `v1.8.1`)](CHANGELOG.md) & [Contributing Guide](CONTRIBUTING.md)
 
 ## Credits
 
