@@ -70,31 +70,58 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 - **`s2idle` suspend & resume with all 12 subsystems preserved**:
   - Restores `MDP_DP_PHY_INTF_SEL` and DP AUX state across `MDSS_GDSC` collapse (`patches/0012`), suspends/resumes Qualcomm Venus under EL1 TrustZone via `HFI PC_PREP` + `qcom_pas_set_remote_state` + AXI halt/reset pulse (`patches/0013`) without reloading PAS 9, and adds `SIMPLE_DEV_PM_OPS` to `spi-hid` (`patches/0014`) to eliminate post-resume `-ESHUTDOWN` (`-108`) digitizer lockups. Paired with non-blocking `systemd/system-sleep/` hooks (SLPI FastRPC freeze guard, IPTS restart, deferred audio/power sync preventing `user.slice` deadlocks), `ModemManager --test-quick-suspend-resume`, and clean pre-shutdown Venus/IPA teardown ([`systemd/surface-pre-shutdown.service`](systemd/surface-pre-shutdown.service)).
 
-## Quick Install
+## Quick Install & Diagnostics
 
 ```bash
-# 1. Install and auto-build the 8 out-of-tree SQ2 kernel modules via DKMS
+# Option A: Direct DKMS + user-space installation
 sudo ./scripts/install-sq2-dkms.sh
-
-# 2. Install all user-space daemons, udev rules, systemd services,
-#    Slim Pen 2 tactile haptics, Mutter #5215 tablet guard & GNOME white hover dot
 sudo ./scripts/install-sq2-userspace.sh
+
+# Option B: Native Arch Linux ARM package (DKMS + user-space stack)
+cd packaging/arch && makepkg -si
+
+# Verify all 15 hardware subsystems in one command
+./scripts/surface-sq2-diag.sh
 ```
 
 See the full step-by-step [Build & Installation Guide](docs/BUILD_AND_INSTALL.md) for in-tree kernel patches (`patches/0001..0014`), Device Tree includes (`dts/`), `libcamera` SoftISP tuning, and Howdy Windows Hello IR Face ID setup.
+
+## SC8180X SQ2 System Architecture
+
+```mermaid
+flowchart LR
+    subgraph APSS["Qualcomm SC8180X APSS (Linux 7.3 EL1)"]
+        K["In-Tree Patches (0001..0014)<br/>CAMSS · Venus · IPA v4.1 · drm/msm · spi-hid · SoundWire"]
+        D["8 DKMS Modules<br/>spi-hid · surface_cam_spmi · surface_ldoe14_xob<br/>surface_typec · tpm_qcom_qsee · spx_tcs3430<br/>sq2_venus_overlay · sq2_s2idle_pm"]
+        U["User-Space Stack<br/>libcamera GPU SoftISP · Howdy IR Face ID<br/>iptsd · surface-pen-haptics (0x0E) · Hover Dot<br/>surface-auto-brightness · ModemManager"]
+    end
+
+    subgraph HW["Surface Pro X SQ2 Hardware Subsystems"]
+        CAM["3 Cameras & LEDs<br/>OV5693 · OV13858 · OV7251 IR"]
+        PEN["Touch & Slim Pen 2<br/>IPTS SPI-HID · BLE-LC (0xFFF4)<br/>Tactile Haptics (0x0E)"]
+        MOD["4G LTE & GNSS<br/>Snapdragon X24 · IPA v4.1<br/>EL1 SCM SPI NOR FSG"]
+        VID["Display, GPU & Video<br/>eDP 2880x1920 · Adreno 685<br/>2x USB-C DP · Venus 4K"]
+        SEC["Sensors, Audio & Security<br/>WCD934x/WSA8815 · SLPI IMU<br/>TCS3430 ALS · QSEE fTPM 2.0"]
+    end
+
+    K --> CAM & VID & MOD
+    D --> CAM & PEN & VID & SEC
+    U --> CAM & PEN & MOD & SEC
+```
 
 ## Repository Layout
 
 ```text
 patches/    Clean Linux v7.3 patches (ov13858, ov7251, camss, SSAM Type-C, spi-hid, drm/msm A680, soundwire-qcom, videocc-sm8150, venus-sq2, ipa-v4.1, s2idle PM)
 dts/        Symbolic SC8180X SQ2 DTSIs (cameras, SLPI, Type-C/DP, SW_LID + TCS3430, Venus VIDEOCC, IPA v4.1) + reference diffs
-drivers/    Out-of-tree kernel modules (surface_cam_spmi, surface_ldoe14_xob, tpm_qcom_qsee, surface_typec, spi_hid, spx_tcs3430, surface_ir_sfmt, sq2_venus_overlay, sq2_fsg_read)
-dkms/       Unified DKMS config & Makefile auto-rebuilding all 7 standalone SQ2 modules on kernel upgrades
+drivers/    Out-of-tree kernel modules (surface_cam_spmi, surface_ldoe14_xob, tpm_qcom_qsee, surface_typec, spi_hid, spx_tcs3430, surface_ir_sfmt, sq2_venus_overlay, sq2_fsg_read, sq2_s2idle_pm)
+dkms/       Unified DKMS config & Makefile auto-rebuilding all 8 standalone SQ2 modules on kernel upgrades
+packaging/  Native Arch Linux ARM (aarch64) PKGBUILD for the full SQ2 DKMS + user-space stack
 libcamera/  Symmetric DebayerEGL IPA YAMLs, WirePlumber rules, Adreno 685 env configs
 faceid/     Howdy PAM/CLI single-thread wrappers, OV7251 config.ini.example, PAM guide
-scripts/    DKMS & in-tree kernel builders, Camera/Venus/LTE boot loaders, pre-shutdown teardown, media-ctl topology script, GTK4/Libadwaita camera control panel
+scripts/    DKMS & in-tree kernel builders, 1-command userspace installer, 15-subsystem health check, Camera/Venus/LTE loaders, pre-shutdown teardown, GTK4 camera panel
 daemons/    Wi-Fi QRTR drop-in, audio sync, BT MAC, power profiles, ALS, lid/posture, pen BLE-LC & tactile haptics, Mutter #5215 tablet guard, GPS
-configs/    udev rules, modprobe blacklists, iptsd.conf, BlueZ Privacy snippet, mpv V4L2 M2M config, systemd sleep/logind configs, smart-osk GNOME extension
+configs/    udev rules, modprobe/modules-load configs, iptsd.conf, BlueZ Privacy snippet, mpv V4L2 M2M config, systemd sleep/logind configs, smart-osk GNOME extension
 extensions/ GNOME Shell 50/51 extensions (surface-pen-dot@linux-surface crisp white stylus hover dot)
 systemd/    Systemd service units, drop-ins (ModemManager, iio-sensor-proxy), and system-sleep hooks
 docs/       Hardware reference notes & build/installation guide

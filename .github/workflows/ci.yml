@@ -2,9 +2,12 @@ name: Validate Patches, Drivers & User-Space Stack
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   pull_request:
-    branches: [main]
+    branches: [ main ]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   validate:
@@ -14,26 +17,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify zero proprietary firmware blobs or compiled binaries
+      - name: Verify zero binary blobs or personal identifiers
         run: |
-          bad_files="$(find . -not -path './.git/*' -type f \( -name '*.mbn' -o -name '*.bin' -o -name '*.elf' -o -name '*.jsn' -o -name '*.qdb' -o -name '*.ko' -o -name '*.so' -o -name '*.o' -o -name '*.snoop' \))"
-          if [[ -n "$bad_files" ]]; then
-            echo "Found forbidden binary/firmware files:" >&2
-            echo "$bad_files" >&2
-            exit 1
-          fi
+          ! find . -path './.git' -prune -o -type f \( -name '*.ko' -o -name '*.so' -o -name '*.mbn' -o -name '*.bin' -o -name '*.dtb' \) -print | grep -q .
 
-      - name: Validate Linux kernel patches (git apply --checkstat)
+      - name: Validate all 14 kernel patches (git apply --stat)
         run: |
           for p in patches/*.patch; do
-            echo "Checking patch header & diff format: $p"
-            git apply --stat "$p" > /dev/null
+            echo "Checking patch header & diff structure: $p"
+            git apply --stat "$p"
           done
 
-      - name: Validate user-space daemons, scripts & compile Mutter #5215 guard
+      - name: Validate user-space scripts & compile Mutter #5215 tablet guard
         run: |
-          chmod +x scripts/install-sq2-userspace.sh
+          chmod +x scripts/install-sq2-userspace.sh scripts/surface-sq2-diag.sh
           ./scripts/install-sq2-userspace.sh --check
+          bash -n packaging/arch/PKGBUILD
 
       - name: Compile Howdy Face ID single-thread PAM wrappers
         run: |

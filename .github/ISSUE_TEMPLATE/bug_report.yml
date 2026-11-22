@@ -1,0 +1,48 @@
+name: Hardware Bug Report (Surface Pro X SQ1 / SQ2)
+description: Report an issue with a kernel patch, DKMS module, or user-space daemon on Surface Pro X
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: model
+    attributes:
+      label: Surface Pro X Model
+      options:
+        - Surface Pro X SQ2 (Microsoft SQ2 / Adreno 685)
+        - Surface Pro X SQ1 (Microsoft SQ1 / Adreno 680)
+    validations:
+      required: true
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Affected Subsystem
+      options:
+        - Cameras (OV5693 / OV13858 / OV7251) & libcamera SoftISP
+        - Windows Hello IR Face ID (Howdy)
+        - Surface Slim Pen 2 (BLE Auto-Connect / Tactile Haptics / White Hover Dot)
+        - Touchscreen & IPTS (spi-hid / iptsd)
+        - 4G LTE Modem (Snapdragon X24 / IPA v4.1 / sq2_fsg_read)
+        - Hardware Video Decode (Qualcomm Venus 4K HFI4)
+        - Display / Adreno 685 / USB-C DisplayPort Alt Mode
+        - Audio (WCD934x / WSA8815 / surface_ldoe14_xob)
+        - Wi-Fi / Bluetooth (WCN3998 / QRTR)
+        - Sensors (SLPI IMU / TCS3430 ALS / Hall-Sensor Lid)
+        - S2idle Suspend & Resume / sq2_s2idle_pm
+        - Hardware TPM 2.0 (tpm_qcom_qsee)
+        - Hardware GNSS / GPS
+    validations:
+      required: true
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel Version (uname -r)
+      placeholder: "7.3.1-1-surface"
+    validations:
+      required: true
+  - type: textarea
+    id: diag
+    attributes:
+      label: Output of ./scripts/surface-sq2-diag.sh and relevant dmesg logs
+      render: shell
+    validations:
+      required: true

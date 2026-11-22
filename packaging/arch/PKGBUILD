@@ -1,0 +1,97 @@
+# Maintainer: robertijtsma <37256770+robertijtsma@users.noreply.github.com>
+pkgname=surface-pro-x-sq2-support
+pkgver=1.8.0
+pkgrel=1
+pkgdesc="Complete Linux hardware enablement (DKMS modules, daemons, udev, systemd, Slim Pen 2 haptics & hover dot) for Microsoft Surface Pro X SQ2 (SC8180X)"
+arch=('aarch64')
+url="https://github.com/robertijtsma/surface-pro-x-sq2-linux"
+license=('GPL-2.0-only' 'CC0-1.0')
+depends=(
+  'bluez'
+  'dkms'
+  'glib2'
+  'gobject-introspection-runtime'
+  'iptsd'
+  'libcamera'
+  'modemmanager'
+  'python'
+  'python-dbus'
+  'python-gobject'
+  'rmtfs'
+  'v4l-utils'
+  'wireplumber'
+)
+makedepends=('gcc' 'linux-headers')
+source=()
+
+build() {
+  local repo_root
+  repo_root="$(cd "${startdir}/../.." && pwd)"
+  gcc -shared -fPIC -O2 -Wall -Wextra \
+    -o "${srcdir}/libmutter-tablet-nullguard.so" \
+    "${repo_root}/daemons/pen/mutter-5215-nullguard.c" -ldl
+}
+
+package() {
+  local repo_root dkms_dest
+  repo_root="$(cd "${startdir}/../.." && pwd)"
+  dkms_dest="${pkgdir}/usr/src/surface-pro-x-sq2-${pkgver}"
+
+  # 1. Stage 8 DKMS kernel modules
+  install -dm755 "${dkms_dest}"
+  install -Dm644 "${repo_root}/dkms/dkms.conf" "${dkms_dest}/dkms.conf"
+  install -Dm644 "${repo_root}/dkms/Makefile" "${dkms_dest}/Makefile"
+  for mod in spi_hid spx_tcs3430 sq2_s2idle_pm sq2_venus_overlay surface_cam_spmi surface_ldoe14_xob surface_typec tpm_qcom_qsee; do
+    cp -a "${repo_root}/drivers/${mod}" "${dkms_dest}/${mod}"
+  done
+
+  # 2. Daemons & helper scripts
+  install -Dm755 "${repo_root}/daemons/audio/surface-audio-boot-sync.sh" "${pkgdir}/usr/local/sbin/surface-audio-boot-sync.sh"
+  install -Dm755 "${repo_root}/daemons/bluetooth/surface-bt-mac.sh" "${pkgdir}/usr/local/sbin/surface-bt-mac.sh"
+  install -Dm755 "${repo_root}/daemons/gps/surface-qmi-gps-daemon.py" "${pkgdir}/usr/local/sbin/surface-qmi-gps-daemon.py"
+  install -Dm755 "${repo_root}/daemons/power/surface-auto-power-profile.sh" "${pkgdir}/usr/local/sbin/surface-auto-power-profile.sh"
+  install -Dm755 "${repo_root}/daemons/power/surface-power-profile" "${pkgdir}/usr/local/bin/surface-power-profile"
+  install -Dm755 "${repo_root}/daemons/display/surface-auto-brightness" "${pkgdir}/usr/local/bin/surface-auto-brightness"
+  install -Dm755 "${repo_root}/daemons/posture/surface-lid-daemon.sh" "${pkgdir}/usr/local/bin/surface-lid-daemon.sh"
+  install -Dm755 "${repo_root}/daemons/posture/surface-touch-rotate" "${pkgdir}/usr/local/bin/surface-touch-rotate"
+  install -Dm755 "${repo_root}/daemons/iptsd/start-surface-iptsd.sh" "${pkgdir}/usr/local/bin/start-surface-iptsd.sh"
+  install -Dm755 "${repo_root}/daemons/pen/surface-pen-blelc-setup" "${pkgdir}/usr/local/bin/surface-pen-blelc-setup"
+  install -Dm755 "${repo_root}/daemons/pen/surface-pen-haptics" "${pkgdir}/usr/local/bin/surface-pen-haptics"
+  install -Dm755 "${repo_root}/scripts/surface-pre-shutdown.sh" "${pkgdir}/usr/local/bin/surface-pre-shutdown.sh"
+  install -Dm755 "${repo_root}/scripts/surface-sq2-diag.sh" "${pkgdir}/usr/local/bin/surface-sq2-diag"
+  install -Dm755 "${repo_root}/scripts/camera/surface-camera-load" "${pkgdir}/usr/local/bin/surface-camera-load"
+  install -Dm755 "${repo_root}/scripts/camera/surface-camera-check" "${pkgdir}/usr/local/bin/surface-camera-check"
+  install -Dm755 "${repo_root}/scripts/camera/surface-camera-faceid-settings" "${pkgdir}/usr/local/bin/surface-camera-faceid-settings"
+  install -Dm755 "${repo_root}/scripts/video/surface-venus-load" "${pkgdir}/usr/local/bin/surface-venus-load"
+  install -Dm755 "${repo_root}/scripts/lte/surface-lte-load" "${pkgdir}/usr/local/bin/surface-lte-load"
+  install -Dm755 "${repo_root}/scripts/sensors/surface-wait-slpi-sensors" "${pkgdir}/usr/local/bin/surface-wait-slpi-sensors"
+
+  # 3. Mutter #5215 tablet guard & GNOME Shell hover-dot extension
+  install -Dm755 "${srcdir}/libmutter-tablet-nullguard.so" "${pkgdir}/usr/local/lib/libmutter-tablet-nullguard.so"
+  install -Dm644 "${repo_root}/extensions/surface-pen-dot@linux-surface/extension.js" \
+    "${pkgdir}/usr/share/gnome-shell/extensions/surface-pen-dot@linux-surface/extension.js"
+  install -Dm644 "${repo_root}/extensions/surface-pen-dot@linux-surface/dotWorker.js" \
+    "${pkgdir}/usr/share/gnome-shell/extensions/surface-pen-dot@linux-surface/dotWorker.js"
+  install -Dm644 "${repo_root}/extensions/surface-pen-dot@linux-surface/metadata.json" \
+    "${pkgdir}/usr/share/gnome-shell/extensions/surface-pen-dot@linux-surface/metadata.json"
+
+  # 4. Configs, udev rules, systemd units & sleep hooks
+  install -Dm644 "${repo_root}/configs/iptsd/iptsd.conf" "${pkgdir}/etc/iptsd.conf"
+  install -Dm644 "${repo_root}/configs/systemd/surface-s2idle.conf" "${pkgdir}/etc/systemd/sleep.conf.d/surface-s2idle.conf"
+  install -Dm644 "${repo_root}/configs/systemd/surface-lid.conf" "${pkgdir}/etc/systemd/logind.conf.d/surface-lid.conf"
+  for f in "${repo_root}"/configs/udev/*.rules; do
+    install -Dm644 "$f" "${pkgdir}/etc/udev/rules.d/$(basename "$f")"
+  done
+  for f in "${repo_root}"/configs/modprobe.d/*.conf; do
+    install -Dm644 "$f" "${pkgdir}/etc/modprobe.d/$(basename "$f")"
+  done
+  for f in "${repo_root}"/configs/modules-load.d/*.conf; do
+    install -Dm644 "$f" "${pkgdir}/etc/modules-load.d/$(basename "$f")"
+  done
+  for f in "${repo_root}"/systemd/*.service; do
+    install -Dm644 "$f" "${pkgdir}/etc/systemd/system/$(basename "$f")"
+  done
+  for f in "${repo_root}"/systemd/system-sleep/*.sh; do
+    install -Dm755 "$f" "${pkgdir}/usr/lib/systemd/system-sleep/$(basename "$f")"
+  done
+}
