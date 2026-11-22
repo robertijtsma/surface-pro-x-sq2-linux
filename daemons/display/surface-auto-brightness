@@ -426,7 +426,7 @@ class WindowsStyleAdaptiveBrightness:
             self.smoothed_lux = lux
             self.user_reference_lux = lux
         else:
-            alpha = 0.20
+            alpha = 0.35
             self.smoothed_lux = alpha * lux + (1.0 - alpha) * self.smoothed_lux
 
         now = time.time()
@@ -463,7 +463,7 @@ class WindowsStyleAdaptiveBrightness:
     def run(self):
         print(f"[AutoBrightness] Windows-Style Adaptive Brightness with Smooth Fading active. Level: {self.current_brightness} / {self.backlight.max_val}")
         loop = GLib.MainLoop()
-        GLib.timeout_add(600, self.tick_sensor)
+        GLib.timeout_add(1500, self.tick_sensor)
 
         def sig_handler(sig, frame):
             print("\n[AutoBrightness] Exiting cleanly...")

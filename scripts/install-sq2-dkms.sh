@@ -5,13 +5,14 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG_NAME="surface-pro-x-sq2"
-PKG_VER="1.7.0"
+PKG_VER="1.8.0"
 KVER="${1:-$(uname -r)}"
 DEST="/usr/src/${PKG_NAME}-${PKG_VER}"
 
 MODULES=(
     spi_hid
     spx_tcs3430
+    sq2_s2idle_pm
     sq2_venus_overlay
     surface_cam_spmi
     surface_ldoe14_xob
@@ -34,10 +35,13 @@ if [ ! -d "/lib/modules/${KVER}/build" ]; then
     exit 1
 fi
 
-# Remove any previous registration of this package version cleanly
-if dkms status -m "${PKG_NAME}" -v "${PKG_VER}" | grep -q "${PKG_NAME}"; then
-    dkms remove -m "${PKG_NAME}" -v "${PKG_VER}" --all || true
-fi
+# Remove any previous registration of this package cleanly
+for old_ver in 1.7.0 "${PKG_VER}"; do
+    if dkms status -m "${PKG_NAME}" -v "${old_ver}" | grep -q "${PKG_NAME}"; then
+        dkms remove -m "${PKG_NAME}" -v "${old_ver}" --all || true
+    fi
+    rm -rf "/usr/src/${PKG_NAME}-${old_ver}"
+done
 
 rm -rf "${DEST}"
 mkdir -p "${DEST}"
@@ -54,7 +58,7 @@ dkms install -m "${PKG_NAME}" -v "${PKG_VER}" -k "${KVER}" --force
 
 # Clean up any legacy manual copies of the 7 DKMS-managed modules so modprobe
 # resolves unambiguously to /lib/modules/${KVER}/updates/dkms/
-for ko in spi-hid.ko spx_tcs3430.ko sq2_venus_overlay.ko surface_cam_spmi.ko surface_ldoe14_xob.ko surface_typec.ko tpm_qcom_qsee.ko; do
+for ko in spi-hid.ko spx_tcs3430.ko sq2_s2idle_pm.ko sq2_venus_overlay.ko surface_cam_spmi.ko surface_ldoe14_xob.ko surface_typec.ko tpm_qcom_qsee.ko; do
     rm -f "/lib/modules/${KVER}/updates/${ko}" "/lib/modules/${KVER}/extra/${ko}"
 done
 

@@ -19,6 +19,17 @@ Linux 7.3 already carries the SC8180X `gcc-sc8180x.c` `PWRSTS_RET_ON` flags on `
    - `spi-hid-core.c` had no `dev_pm_ops`. On resume, the unmasked digitizer IRQ fired before `spi0` finished resuming, failing with `Failed to receive header: -108` (`-ESHUTDOWN`) and leaving `iptsd` attached to a dead digitizer.
    - Adds `SIMPLE_DEV_PM_OPS(spi_hid_pm_ops, spi_hid_suspend, spi_hid_resume)`: masks IRQ, cancels pending work, clears `ready`, and powers down `vreg_ts_5p0` into `sleep` pinctrl on suspend; asserts reset, powers up rails, holds reset for 100 ms, clears stale pending IRQ state via `irq_set_irqchip_state(..., IRQCHIP_STATE_PENDING, false)`, unmasks IRQ, and deasserts reset on resume.
 
+4. **RPMh `SLEEP` Set, Interconnect `ACTIVE_ONLY` & `mmcx-reg` Cleanup — [`drivers/sq2_s2idle_pm/`](../drivers/sq2_s2idle_pm/) & [`drivers/spx_tcs3430/`](../drivers/spx_tcs3430/)**:
+   - **Root cause of non-zero APSS `18200000.rsc` `RPMH_SLEEP_STATE` votes**:
+     1. `/mmcx-reg` (`compatible = "regulator-fixed-domain"`, which exists in `sc8180x.dtsi` solely for the disabled `dsi@ae94000` node and has `num_users = 0`) binds to `reg-fixed-voltage` with `power-domains = <&rpmhpd SC8180X_MMCX>` and `required-opps = <&rpmhpd_opp_nom>`, pinning `mmcx.lvl` at `256` (`NOM`, `hlvl = 5`) in `RPMH_SLEEP_STATE` 24/7.
+     2. 152 non-display interconnect requests (`qcom-camss` 2 GB/s, `pcie-qcom` 1.97 GB/s, `dwc3-qcom` 2.5 GB/s, `qcom-geni`) default to `QCOM_ICC_TAG_ALWAYS` (`tag = 0` or `7`), keeping `MC0` (DDR), `SH0` (LLCC), `MM0`/`MM1`, `CN0`, `SN3`/`SN15`, and `QUP0` voted on in `QCOM_ICC_BUCKET_SLEEP`.
+     3. In `drivers/soc/qcom/rpmh.c`, `rpmh_flush()` skips programming any `SLEEP`/`WAKE` TCS command when `req->sleep_val == req->wake_val`, leaving `cx.lvl`, `mx.lvl`, `mmcx.lvl`, `xo.lvl`, `lnbclka2`, and `rfclkd2` at their active levels across `S1` / `s2idle`.
+   - **Fix ([`drivers/sq2_s2idle_pm/sq2_s2idle_pm.c`](../drivers/sq2_s2idle_pm/sq2_s2idle_pm.c))**:
+     - Detaches the unused `mmcx-reg` device at module init.
+     - Converts all 152 non-display interconnect requests to `QCOM_ICC_TAG_ACTIVE_ONLY` (`tag = 3`), keeping 100% active/wake bus bandwidth while zeroing their `QCOM_ICC_BUCKET_SLEEP` votes.
+     - During `s2idle` (`suspend_noirq` → `resume_noirq`), switches the suspended `ae00000.display-subsystem` interconnect requests to `QCOM_ICC_TAG_ACTIVE_ONLY` (`tag = 3`) and lowers APSS `18200000.rsc` `sleep_val` for `cx.lvl`, `mx.lvl`, and `mmcx.lvl` to `RETENTION` (`hlvl = 1`, `vlvl = 0x10`) and `xo.lvl`/`lnbclka2`/`rfclkd2` to `0` while keeping `wake_val` at full active levels.
+   - **Ambient Light Sensor PM ([`drivers/spx_tcs3430/spx_tcs3430.c`](../drivers/spx_tcs3430/spx_tcs3430.c))**: powers down the ams TCS3430 sensor (`TCS_ENABLE = 0x00`) during `s2idle` and restores continuous integration (`TCS_ENABLE = 0x03`) on resume.
+
 ## Userspace & `systemd` Integration
 
 - **Enable `s2idle`**: [`configs/systemd/surface-s2idle.conf`](../configs/systemd/surface-s2idle.conf) (`AllowSuspend=yes`, `SuspendState=mem`, `MemorySleepMode=s2idle`, hibernation disabled) replaces the legacy `surface-no-deep-suspend.conf`.

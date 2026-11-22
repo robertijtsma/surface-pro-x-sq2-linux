@@ -10,6 +10,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/pm.h>
 
 #define TCS_ENABLE	0x80
 #define TCS_ATIME	0x81
@@ -186,9 +187,38 @@ static int tcs_probe(struct i2c_client *client)
 	indio->modes = INDIO_DIRECT_MODE;
 	indio->channels = tcs_channels;
 	indio->num_channels = ARRAY_SIZE(tcs_channels);
+	i2c_set_clientdata(client, s);
 
 	return devm_iio_device_register(&client->dev, indio);
 }
+
+static int tcs_suspend(struct device *dev)
+{
+	struct spx_tcs3430 *s = dev_get_drvdata(dev);
+
+	if (!s)
+		return 0;
+	mutex_lock(&s->lock);
+	tcs_write(s, TCS_ENABLE, 0x00);
+	mutex_unlock(&s->lock);
+	return 0;
+}
+
+static int tcs_resume(struct device *dev)
+{
+	struct spx_tcs3430 *s = dev_get_drvdata(dev);
+
+	if (!s)
+		return 0;
+	mutex_lock(&s->lock);
+	tcs_write(s, TCS_ATIME, TCS_CYCLES - 1);
+	tcs_write(s, TCS_CFG1, s->gain_code);
+	tcs_write(s, TCS_ENABLE, 0x03);
+	mutex_unlock(&s->lock);
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(tcs_pm_ops, tcs_suspend, tcs_resume);
 
 static const struct of_device_id tcs_of_match[] = {
 	{ .compatible = "ams,tcs3430" },
@@ -208,6 +238,7 @@ static struct i2c_driver tcs_driver = {
 	.driver = {
 		.name = "spx-tcs3430",
 		.of_match_table = tcs_of_match,
+		.pm = pm_sleep_ptr(&tcs_pm_ops),
 	},
 	.probe = tcs_probe,
 	.id_table = tcs_ids,

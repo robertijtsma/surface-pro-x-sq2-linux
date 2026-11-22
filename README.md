@@ -32,7 +32,7 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 | **Hardware TPM 2.0 (`QSEE fTPM`)** | Working | `tpm_qcom_qsee` QSEECOM transport (`drivers/tpm_qcom_qsee/`); `/dev/tpm0`, `/dev/tpmrm0`, `tpm-rng-0`, SHA-1/256/384 PCR banks |
 | **Hardware Video Decode (`Venus` / Iris1)** | Working | `videocc-sm8150` (`patches/0009`) + `sq2_venus_overlay` (`drivers/sq2_venus_overlay/`) + Linux 7.3 SQ2 HFI4 `venus-{core,dec}` (`patches/0010`); V4L2 M2M bit-exact 4K H.264 / 4K HEVC / 1080p VP9 (GStreamer & FFmpeg) via EL1 PAS 9 |
 | **4G LTE Cellular Modem (`Snapdragon X24` / `IPA v4.1`)** | Working | Qualcomm `IPA v4.1` (`patches/0011`) + `dts/sc8180x-surface-pro-x-sq2-ipa.dtsi` (`rmnet_ipa0` `MAPv4`) + read-only Linux EL1 SCM `modem_fsg` extractor (`drivers/sq2_fsg_read/`) + `ModemManager` (`qcom-soc`, `qrtr0`, SIM/eSIM, `qmapmux0.0`) |
-| **Suspend (`S2idle`)** | Working | `patches/0012..0014` (`drm/msm` DPU/DP resume, Venus EL1 TZ `qcom_pas_set_remote_state` PM, `spi-hid` `SIMPLE_DEV_PM_OPS`) + `systemd/system-sleep/` hooks + `ModemManager --test-quick-suspend-resume`; Hall-sensor lid & power-button wake (~0.9 s suspend / ~1.2 s resume) |
+| **Suspend (`S2idle`)** | Working | `patches/0012..0014` (`drm/msm` DPU/DP resume, Venus EL1 TZ `qcom_pas_set_remote_state` PM, `spi-hid` `SIMPLE_DEV_PM_OPS`) + `sq2_s2idle_pm` (`drivers/sq2_s2idle_pm/`, RPMh `SLEEP` set retention & `QCOM_ICC_TAG_ACTIVE_ONLY`) + `systemd/system-sleep/` hooks + `ModemManager --test-quick-suspend-resume`; Hall-sensor lid & power-button wake (~0.9 s suspend / ~1.2 s resume) |
 
 ## Upstream `linux-surface/surface-pro-x` Issues Addressed
 
@@ -73,8 +73,8 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 ## Quick Install
 
 ```bash
-# 1. Install and auto-build the 7 out-of-tree SQ2 kernel modules via DKMS
-sudo ./scripts/install-dkms.sh
+# 1. Install and auto-build the 8 out-of-tree SQ2 kernel modules via DKMS
+sudo ./scripts/install-sq2-dkms.sh
 
 # 2. Install all user-space daemons, udev rules, systemd services,
 #    Slim Pen 2 tactile haptics, Mutter #5215 tablet guard & GNOME white hover dot
