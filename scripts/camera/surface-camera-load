@@ -12,6 +12,25 @@ fi
 # Clear stale symlinks until media-ctl and Y10 format setup completes
 rm -f /dev/video-ir /dev/video-front /dev/video-rear
 
+# Wait up to 5s for SC8180X remoteprocs (modem, adsp, cdsp, slpi) to finish
+# TrustZone PAS boot before enabling PMC8180-A camera LDOs and CAMCC/MMCX clocks.
+for _ in $(seq 1 25); do
+    PENDING=0
+    for r in /sys/class/remoteproc/remoteproc*; do
+        [ -r "$r/name" ] && [ -r "$r/state" ] || continue
+        case "$(cat "$r/name" 2>/dev/null || true)" in
+            modem|adsp|cdsp|slpi)
+                if [ "$(cat "$r/state" 2>/dev/null || true)" != "running" ]; then
+                    PENDING=1
+                    break
+                fi
+                ;;
+        esac
+    done
+    [ "$PENDING" = "0" ] && break
+    sleep 0.2
+done
+
 echo "[1/4] Enabling PMC8180-A camera SPMI LDO rails and CAMCC clocks..."
 modprobe surface_cam_spmi
 modprobe camcc_sc8180x

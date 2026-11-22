@@ -1,7 +1,7 @@
 [Unit]
 Description=Surface Pro X SQ2 Qualcomm IPA v4.1 LTE Data-Path Setup
 After=basic.target local-fs.target systemd-udev-trigger.service rmtfs.service surface-camera-setup.service surface-venus-setup.service
-Before=ModemManager.service
+Before=ModemManager.service gdm.service display-manager.service
 
 [Service]
 Type=oneshot
