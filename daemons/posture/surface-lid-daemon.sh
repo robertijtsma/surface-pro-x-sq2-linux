@@ -40,6 +40,45 @@ run_user_notify() {
     done
 }
 
+wait_for_session_lock() {
+    local u uid gid dbus_addr locked _i cur_raw has_bus
+    # Wait up to 6s for GNOME ScreenSaver to finish locking cleanly before
+    # freezing user.slice; otherwise systemd-sleep can freeze gnome-shell
+    # mid-lock-transition and wedge UnlockDialog D-Bus proxies on resume.
+    for _i in $(seq 1 30); do
+        if [ -n "$STATE_FILE" ] && [ -r "$STATE_FILE" ]; then
+            IFS= read -r cur_raw < "$STATE_FILE" || cur_raw=""
+            cur_raw="${cur_raw//[[:space:]]/}"
+            if [ "$cur_raw" != "closed" ]; then
+                return 1
+            fi
+        fi
+        has_bus=0
+        for u in $(get_active_users); do
+            uid=$(id -u "$u" 2>/dev/null || true)
+            gid=$(id -g "$u" 2>/dev/null || true)
+            [ -n "$uid" ] && [ -n "$gid" ] && [ -S "/run/user/${uid}/bus" ] || continue
+            has_bus=1
+            dbus_addr="unix:path=/run/user/${uid}/bus"
+            locked=$(timeout 2 setpriv --reuid="$uid" --regid="$gid" --clear-groups \
+                env XDG_RUNTIME_DIR="/run/user/${uid}" DBUS_SESSION_BUS_ADDRESS="$dbus_addr" \
+                gdbus call --session -d org.gnome.ScreenSaver \
+                -o /org/gnome/ScreenSaver -m org.gnome.ScreenSaver.GetActive 2>/dev/null || true)
+            if [[ "$locked" == *"true"* ]]; then
+                # Give GNOME Shell a brief settle window to finish disabling
+                # user extensions and mounting the unlock dialog before freeze.
+                sleep 0.6
+                return 0
+            fi
+        done
+        if [ "$has_bus" -eq 0 ]; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    return 0
+}
+
 set_tablet_switch_inhibit() {
     local val="$1"
     for f in /sys/devices/platform/surface_aggregator_platform_hub.0/*/input/input*/inhibited; do
@@ -113,10 +152,18 @@ while true; do
                     echo 4 > /sys/class/backlight/backlight/bl_power 2>/dev/null || true
                 fi
             else
-                logger -t surface-lid-daemon "Posture: closed -> Lock & s2idle suspend"
+                logger -t surface-lid-daemon "Posture: closed -> Locking session before s2idle suspend"
+                # Keep full CPU speed while GNOME Shell locks and disables
+                # extensions (do NOT switch to power-saver before suspend;
+                # throttling CPUs to powersave causes gnome-shell to exceed
+                # logind's sleep-inhibitor timeout and freeze mid-lock).
                 loginctl lock-sessions 2>/dev/null || true
-                powerprofilesctl set power-saver 2>/dev/null || true
-                systemctl suspend 2>/dev/null || true
+                if wait_for_session_lock; then
+                    logger -t surface-lid-daemon "Posture: closed -> Session locked, entering s2idle suspend"
+                    systemctl suspend 2>/dev/null || true
+                else
+                    logger -t surface-lid-daemon "Posture: lid reopened during lock -> Aborting suspend"
+                fi
             fi
         elif [ "$CUR_STATE" = "laptop" ]; then
             logger -t surface-lid-daemon "Posture: laptop -> Laptop Mode active"
