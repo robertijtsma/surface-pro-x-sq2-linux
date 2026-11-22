@@ -1,7 +1,8 @@
 [Unit]
 Description=Surface Pro X SQ2 Clean Pre-Shutdown Teardown (Venus VPU & IPA v4.1)
 DefaultDependencies=no
-After=multi-user.target
+After=multi-user.target rmtfs.service surface-venus-setup.service surface-lte-setup.service
+Conflicts=shutdown.target reboot.target poweroff.target halt.target
 Before=shutdown.target reboot.target poweroff.target halt.target
 
 [Service]
@@ -9,7 +10,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/true
 ExecStop=/usr/local/bin/surface-pre-shutdown.sh
-TimeoutStopSec=5
+TimeoutStopSec=8
 
 [Install]
 WantedBy=multi-user.target
