@@ -1,0 +1,42 @@
+name: Validate Patches, Drivers & User-Space Stack
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    name: Syntax, Build & No-Blob Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify zero proprietary firmware blobs or compiled binaries
+        run: |
+          bad_files="$(find . -not -path './.git/*' -type f \( -name '*.mbn' -o -name '*.bin' -o -name '*.elf' -o -name '*.jsn' -o -name '*.qdb' -o -name '*.ko' -o -name '*.so' -o -name '*.o' -o -name '*.snoop' \))"
+          if [[ -n "$bad_files" ]]; then
+            echo "Found forbidden binary/firmware files:" >&2
+            echo "$bad_files" >&2
+            exit 1
+          fi
+
+      - name: Validate Linux kernel patches (git apply --checkstat)
+        run: |
+          for p in patches/*.patch; do
+            echo "Checking patch header & diff format: $p"
+            git apply --stat "$p" > /dev/null
+          done
+
+      - name: Validate user-space daemons, scripts & compile Mutter #5215 guard
+        run: |
+          chmod +x scripts/install-sq2-userspace.sh
+          ./scripts/install-sq2-userspace.sh --check
+
+      - name: Compile Howdy Face ID single-thread PAM wrappers
+        run: |
+          gcc -O2 -Wall -Wextra -o /tmp/howdy-pam-wrapper faceid/howdy-pam-wrapper.c
+          gcc -O2 -Wall -Wextra -o /tmp/howdy-cli-wrapper faceid/howdy-cli-wrapper.c
+          rm -f /tmp/howdy-pam-wrapper /tmp/howdy-cli-wrapper

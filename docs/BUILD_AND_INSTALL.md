@@ -328,8 +328,51 @@ sudo systemctl restart ModemManager.service surface-lid-daemon.service
 
 After rebooting, verify `busctl get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CanSuspend` returns `s "yes"`, and close/open the Type Cover (or press the power button) to test `s2idle` suspend and instant Hall-sensor wake.
 
+## 12. Surface Slim Pen 2 Tactile Haptics (`UsagePage 0x0E`), White Hover Dot & Pre-Shutdown Teardown
 
+See [`docs/SLIM_PEN_2_BLUETOOTH.md`](SLIM_PEN_2_BLUETOOTH.md) for architecture notes and BLE Link-Layer traces.
 
+1. **Install the real-time tactile haptics daemon and udev/systemd hooks**:
 
+```bash
+sudo install -m 755 daemons/pen/surface-pen-haptics /usr/local/bin/
+sudo install -m 644 configs/udev/70-surface-pen-haptics.rules /etc/udev/rules.d/
+sudo install -m 644 configs/udev/99-surface-input-clean.rules /etc/udev/rules.d/
+sudo install -m 644 systemd/surface-pen-haptics.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo udevadm control --reload-rules
+sudo systemctl enable --now surface-pen-haptics.service
+```
 
+2. **Compile and enable the GNOME Mutter 51.1 `#5215` null-guard & tablet cursor suppressor**:
+
+```bash
+gcc -shared -fPIC -O2 -Wall -Wextra \
+    -o libmutter-tablet-nullguard.so daemons/pen/mutter-5215-nullguard.c -ldl
+sudo install -Dm755 libmutter-tablet-nullguard.so /usr/local/lib/libmutter-tablet-nullguard.so
+rm -f libmutter-tablet-nullguard.so
+
+mkdir -p ~/.config/systemd/user/org.gnome.Shell@user.service.d
+cp configs/systemd/10-mutter-5215-nullguard.conf \
+    ~/.config/systemd/user/org.gnome.Shell@user.service.d/
+systemctl --user daemon-reload
+```
+
+3. **Install and enable the crisp white pen hover dot GNOME Shell extension**:
+
+```bash
+mkdir -p ~/.local/share/gnome-shell/extensions/surface-pen-dot@linux-surface
+cp -r extensions/surface-pen-dot@linux-surface/* \
+    ~/.local/share/gnome-shell/extensions/surface-pen-dot@linux-surface/
+gnome-extensions enable surface-pen-dot@linux-surface
+```
+
+4. **Install the clean pre-shutdown Venus VPU & IPA v4.1 teardown service**:
+
+```bash
+sudo install -m 755 scripts/surface-pre-shutdown.sh /usr/local/bin/
+sudo install -m 644 systemd/surface-pre-shutdown.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now surface-pre-shutdown.service
+```
 

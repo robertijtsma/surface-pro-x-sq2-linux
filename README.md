@@ -1,5 +1,10 @@
 # Surface Pro X SQ2 (SC8180X / ARM64) Linux Enablement
 
+[![CI Validation](https://github.com/robertijtsma/surface-pro-x-sq2-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/robertijtsma/surface-pro-x-sq2-linux/actions/workflows/ci.yml)
+[![Latest Release](https://img.shields.io/github/v/release/robertijtsma/surface-pro-x-sq2-linux)](https://github.com/robertijtsma/surface-pro-x-sq2-linux/releases)
+[![Kernel](https://img.shields.io/badge/Linux-7.3.1--1--surface%20(arm64)-blue)](patches/)
+[![License: GPL-2.0](https://img.shields.io/badge/License-GPL--2.0--only-green.svg)](LICENSE)
+
 Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamera` GPU SoftISP tuning, Windows Hello IR Face ID (Howdy), and system daemons bringing up the **Microsoft Surface Pro X SQ2 (Qualcomm SC8180X)** on Arch Linux ARM64 (`7.3.1-1-surface`).
 
 ## Hardware Status (Verified on Live SQ2 Hardware)
@@ -42,7 +47,7 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
 | [`#39`](https://github.com/linux-surface/surface-pro-x/issues/39) | **Support for GNSS / GPS** | [`daemons/gps/surface-qmi-gps-daemon.py`](daemons/gps/surface-qmi-gps-daemon.py) (QRTR QMI LOC → NMEA socket) |
 | [`#42`](https://github.com/linux-surface/surface-pro-x/issues/42) | **`ath10k` Wi-Fi / MPSS QMI cold-boot race** | [`daemons/wifi-qrtr/10-modem-preboot.conf`](daemons/wifi-qrtr/10-modem-preboot.conf) |
 | [`#51`](https://github.com/linux-surface/surface-pro-x/issues/51) | **Display / DPU / USB-C DisplayPort Alt Mode & Adreno 685 GMEM/HWCG** | [`patches/0005`](patches/0005-platform-surface-aggregator-registry-spx-usc.patch), [`patches/0007`](patches/0007-drm-msm-a680-gmem-hwcg-mmio-and-dpu-dp-fixes.patch), [`drivers/surface_typec/`](drivers/surface_typec/), [`dts/sc8180x-surface-pro-x-sq2-typec-dp.dtsi`](dts/sc8180x-surface-pro-x-sq2-typec-dp.dtsi) |
-| [`linux-surface#1656`](https://github.com/linux-surface/linux-surface/issues/1656) | **Surface Slim Pen 2 Bluetooth auto-reconnect (1× click & charger lift)** | [`configs/bluetooth/main.conf.snippet`](configs/bluetooth/main.conf.snippet), [`daemons/pen/surface-pen-blelc-setup`](daemons/pen/surface-pen-blelc-setup), [`docs/SLIM_PEN_2_BLUETOOTH.md`](docs/SLIM_PEN_2_BLUETOOTH.md) |
+| [`linux-surface#1656`](https://github.com/linux-surface/linux-surface/issues/1656) | **Surface Slim Pen 2 Bluetooth auto-reconnect, Tactile Haptics (`UsagePage 0x0E`) & White Hover Dot** | [`configs/bluetooth/main.conf.snippet`](configs/bluetooth/main.conf.snippet), [`daemons/pen/surface-pen-blelc-setup`](daemons/pen/surface-pen-blelc-setup), [`daemons/pen/surface-pen-haptics`](daemons/pen/surface-pen-haptics), [`daemons/pen/mutter-5215-nullguard.c`](daemons/pen/mutter-5215-nullguard.c), [`extensions/surface-pen-dot@linux-surface/`](extensions/surface-pen-dot@linux-surface/), [`docs/SLIM_PEN_2_BLUETOOTH.md`](docs/SLIM_PEN_2_BLUETOOTH.md) |
 
 ## Key Technical Highlights
 
@@ -64,6 +69,19 @@ Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamer
   - Added [`surface-pen-haptics`](daemons/pen/surface-pen-haptics) (`UsagePage 0x0E` Simple Haptics Controller `0x41`/`0x42` real-time tactile writing/erasing/tap-click daemon with 7.5 ms BLE interval and native Write With Response), [`extensions/surface-pen-dot@linux-surface/`](extensions/surface-pen-dot@linux-surface/) (synchronous `GPollableInputStream` white hover dot), and [`daemons/pen/mutter-5215-nullguard.c`](daemons/pen/mutter-5215-nullguard.c) (hiding the default mouse arrow for `CLUTTER_SPRITE_ROLE_TABLET` and guarding GNOME Mutter 51.1 [`#5215`](https://gitlab.gnome.org/GNOME/mutter/-/issues/5215) `wl_resource_get_client(NULL)`).
 - **`s2idle` suspend & resume with all 12 subsystems preserved**:
   - Restores `MDP_DP_PHY_INTF_SEL` and DP AUX state across `MDSS_GDSC` collapse (`patches/0012`), suspends/resumes Qualcomm Venus under EL1 TrustZone via `HFI PC_PREP` + `qcom_pas_set_remote_state` + AXI halt/reset pulse (`patches/0013`) without reloading PAS 9, and adds `SIMPLE_DEV_PM_OPS` to `spi-hid` (`patches/0014`) to eliminate post-resume `-ESHUTDOWN` (`-108`) digitizer lockups. Paired with non-blocking `systemd/system-sleep/` hooks (SLPI FastRPC freeze guard, IPTS restart, deferred audio/power sync preventing `user.slice` deadlocks), `ModemManager --test-quick-suspend-resume`, and clean pre-shutdown Venus/IPA teardown ([`systemd/surface-pre-shutdown.service`](systemd/surface-pre-shutdown.service)).
+
+## Quick Install
+
+```bash
+# 1. Install and auto-build the 7 out-of-tree SQ2 kernel modules via DKMS
+sudo ./scripts/install-dkms.sh
+
+# 2. Install all user-space daemons, udev rules, systemd services,
+#    Slim Pen 2 tactile haptics, Mutter #5215 tablet guard & GNOME white hover dot
+sudo ./scripts/install-sq2-userspace.sh
+```
+
+See the full step-by-step [Build & Installation Guide](docs/BUILD_AND_INSTALL.md) for in-tree kernel patches (`patches/0001..0014`), Device Tree includes (`dts/`), `libcamera` SoftISP tuning, and Howdy Windows Hello IR Face ID setup.
 
 ## Repository Layout
 
