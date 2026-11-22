@@ -1,11 +1,14 @@
+![Surface Pro X SQ2 Linux 7.3 ARM64 Enablement](assets/banner.svg)
+
 # Surface Pro X SQ2 (SC8180X / ARM64) Linux Enablement
 
 [![CI Validation](https://github.com/robertijtsma/surface-pro-x-sq2-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/robertijtsma/surface-pro-x-sq2-linux/actions/workflows/ci.yml)
 [![Latest Release](https://img.shields.io/github/v/release/robertijtsma/surface-pro-x-sq2-linux)](https://github.com/robertijtsma/surface-pro-x-sq2-linux/releases)
+[![Docs Site](https://img.shields.io/badge/Docs-GitHub%20Pages-38bdf8)](https://robertijtsma.github.io/surface-pro-x-sq2-linux/)
 [![Kernel](https://img.shields.io/badge/Linux-7.3.1--1--surface%20(arm64)-blue)](patches/)
 [![License: GPL-2.0](https://img.shields.io/badge/License-GPL--2.0--only-green.svg)](LICENSE)
 
-Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamera` GPU SoftISP tuning, Windows Hello IR Face ID (Howdy), and system daemons bringing up the **Microsoft Surface Pro X SQ2 (Qualcomm SC8180X)** on Arch Linux ARM64 (`7.3.1-1-surface`).
+Kernel patches, Device Tree definitions, out-of-tree rail controllers, `libcamera` GPU SoftISP tuning, Windows Hello IR Face ID (Howdy), and system daemons bringing up **100% of the hardware** on the **Microsoft Surface Pro X SQ2 (Qualcomm SC8180X)** running Arch Linux ARM64 (`7.3.1-1-surface`). Also see the [SQ1 vs. SQ2 Compatibility Guide](docs/SQ1_VS_SQ2.md) and the [Live Documentation Site](https://robertijtsma.github.io/surface-pro-x-sq2-linux/).
 
 ## Hardware Status (Verified on Live SQ2 Hardware)
 
@@ -84,6 +87,8 @@ cd packaging/arch && makepkg -si
 ./scripts/surface-sq2-diag.sh
 ```
 
+![Surface Pro X SQ2 15-Subsystem Diagnostic Preview](assets/diag-preview.svg)
+
 See the full step-by-step [Build & Installation Guide](docs/BUILD_AND_INSTALL.md) for in-tree kernel patches (`patches/0001..0014`), Device Tree includes (`dts/`), `libcamera` SoftISP tuning, and Howdy Windows Hello IR Face ID setup.
 
 ## SC8180X SQ2 System Architecture
@@ -129,13 +134,16 @@ docs/       Hardware reference notes & build/installation guide
 
 ## Documentation
 
+- [Live Project Site (GitHub Pages)](https://robertijtsma.github.io/surface-pro-x-sq2-linux/)
+- [SQ1 vs. SQ2 Compatibility Matrix](docs/SQ1_VS_SQ2.md)
 - [Camera Hardware Notes (CSIPHY, SMMU, SPMI, Titan 175, DebayerEGL)](docs/CAMERA_HARDWARE.md)
 - [Venus 4K Hardware Video Decode Notes (Iris1, HFI4, EL1 PAS 9)](docs/VENUS_VIDEO_DECODE.md)
 - [Snapdragon X24 4G LTE & IPA v4.1 Notes (EL1 SCM FSG, QMAP)](docs/LTE_MODEM_IPA.md)
-- [S2idle Deep Sleep Notes (EL1 Venus TZ PM, `spi-hid`, DPU/DP, `systemd` hooks)](docs/S2IDLE_SUSPEND.md)
-- [Surface Slim Pen 2 Bluetooth Auto-Connect & BLE-LC Notes (`Privacy = device`, Local IRK, `UsagePage 0xFFF4`)](docs/SLIM_PEN_2_BLUETOOTH.md)
+- [S2idle Deep Sleep Notes (EL1 Venus TZ PM, `spi-hid`, DPU/DP, `sq2_s2idle_pm`, `systemd` hooks)](docs/S2IDLE_SUSPEND.md)
+- [Surface Slim Pen 2 Bluetooth Auto-Connect, Tactile Haptics (`0x0E`) & White Hover Dot Notes](docs/SLIM_PEN_2_BLUETOOTH.md)
 - [Build & Installation Guide](docs/BUILD_AND_INSTALL.md)
 - [Howdy IR Face ID Setup](faceid/README.md)
+- [Changelog (`v1.0.0` – `v1.8.0`)](CHANGELOG.md) & [Contributing Guide](CONTRIBUTING.md)
 
 ## Credits
 

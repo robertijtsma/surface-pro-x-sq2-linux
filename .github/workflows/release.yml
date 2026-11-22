@@ -1,0 +1,41 @@
+name: Package Source DKMS Release Assets
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write
+
+jobs:
+  package-release:
+    name: Build Source-Only DKMS Tarball & Checksums
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Package clean source-only DKMS tarball
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
+          STAGE="surface-pro-x-sq2-${VER}"
+          mkdir -p "${STAGE}"
+          cp dkms/dkms.conf dkms/Makefile LICENSE README.md "${STAGE}/"
+          for mod in spi_hid spx_tcs3430 sq2_s2idle_pm sq2_venus_overlay surface_cam_spmi surface_ldoe14_xob surface_typec tpm_qcom_qsee; do
+            cp -a "drivers/${mod}" "${STAGE}/${mod}"
+          done
+          tar -czf "${STAGE}-dkms-src.tar.gz" "${STAGE}"
+          sha256sum "${STAGE}-dkms-src.tar.gz" > SHA256SUMS
+
+      - name: Attach assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
+          gh release upload "${TAG}" "surface-pro-x-sq2-${VER}-dkms-src.tar.gz" SHA256SUMS --clobber

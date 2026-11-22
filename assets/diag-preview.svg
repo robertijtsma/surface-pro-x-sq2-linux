@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 440" width="100%" role="img" aria-label="Surface Pro X SQ2 15-Subsystem Hardware Diagnostic Output">
+  <rect width="920" height="440" rx="14" fill="#0d1117"/>
+  <rect x="1" y="1" width="918" height="438" rx="13" fill="none" stroke="#30363d" stroke-width="1.5"/>
+
+  <!-- Window Titlebar -->
+  <path d="M1 14 Q1 1 14 1 L906 1 Q919 1 919 14 L919 38 L1 38 Z" fill="#161b22"/>
+  <line x1="1" y1="38" x2="919" y2="38" stroke="#30363d" stroke-width="1"/>
+  <circle cx="22" cy="19.5" r="5.5" fill="#ff5f56"/>
+  <circle cx="40" cy="19.5" r="5.5" fill="#ffbd2e"/>
+  <circle cx="58" cy="19.5" r="5.5" fill="#27c93f"/>
+  <text x="460" y="24" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="12.5" fill="#8b949e">./scripts/surface-sq2-diag.sh — Arch Linux ARM64 (7.3.1-1-surface)</text>
+
+  <!-- Terminal Body -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="13">
+    <text x="22" y="66" fill="#58a6ff" font-weight="700">=== Surface Pro X SQ2 (SC8180X) Hardware Status (7.3.1-1-surface) ===</text>
+
+    <text x="22" y="92" fill="#8b949e">  [</text><text x="46" y="92" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="92" fill="#8b949e">]</text>
+    <text x="94" y="92" fill="#e6edf3">1. Cameras (Front/Rear/IR)</text>
+    <text x="392" y="92" fill="#79c0ff">/dev/video0, /dev/video4, /dev/video12</text>
+
+    <text x="22" y="114" fill="#8b949e">  [</text><text x="46" y="114" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="114" fill="#8b949e">]</text>
+    <text x="94" y="114" fill="#e6edf3">2. Windows Hello IR Face ID</text>
+    <text x="392" y="114" fill="#79c0ff">pam_howdy.so active (/dev/video-ir Y10)</text>
+
+    <text x="22" y="136" fill="#8b949e">  [</text><text x="46" y="136" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="136" fill="#8b949e">]</text>
+    <text x="94" y="136" fill="#e6edf3">3. Stereo Speakers &amp; Mics</text>
+    <text x="392" y="136" fill="#79c0ff">surface_ldoe14_xob + ALSA card0 active</text>
+
+    <text x="22" y="158" fill="#8b949e">  [</text><text x="46" y="158" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="158" fill="#8b949e">]</text>
+    <text x="94" y="158" fill="#e6edf3">4. Wi-Fi (WCN3998 ath10k)</text>
+    <text x="392" y="158" fill="#79c0ff">wlan0 (up, 866 Mbps 802.11ac)</text>
+
+    <text x="22" y="180" fill="#8b949e">  [</text><text x="46" y="180" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="180" fill="#8b949e">]</text>
+    <text x="94" y="180" fill="#e6edf3">5. Bluetooth (WCN3998 + IRK)</text>
+    <text x="392" y="180" fill="#79c0ff">bluetooth.service active, Privacy = device</text>
+
+    <text x="22" y="202" fill="#8b949e">  [</text><text x="46" y="202" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="202" fill="#8b949e">]</text>
+    <text x="94" y="202" fill="#e6edf3">6. Touchscreen &amp; IPTS Digitizer</text>
+    <text x="392" y="202" fill="#79c0ff">spi0.0 ready=ready, surface-iptsd active</text>
+
+    <text x="22" y="224" fill="#8b949e">  [</text><text x="46" y="224" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="224" fill="#8b949e">]</text>
+    <text x="94" y="224" fill="#e6edf3">7. Slim Pen 2 Haptics &amp; Hover Dot</text>
+    <text x="392" y="224" fill="#79c0ff">surface-pen-haptics + nullguard active</text>
+
+    <text x="22" y="246" fill="#8b949e">  [</text><text x="46" y="246" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="246" fill="#8b949e">]</text>
+    <text x="94" y="246" fill="#e6edf3">8. Display &amp; Adreno 685 GPU</text>
+    <text x="392" y="246" fill="#79c0ff">card0-eDP-1 (2880x1920 @ 60 Hz)</text>
+
+    <text x="22" y="268" fill="#8b949e">  [</text><text x="46" y="268" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="268" fill="#8b949e">]</text>
+    <text x="94" y="268" fill="#e6edf3">9. USB-C PD &amp; DP Alt Mode</text>
+    <text x="392" y="268" fill="#79c0ff">surface_typec module active (DP-1/DP-2)</text>
+
+    <text x="22" y="290" fill="#8b949e">  [</text><text x="46" y="290" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="290" fill="#8b949e">]</text>
+    <text x="94" y="290" fill="#e6edf3">10. Ambient Light Sensor (TCS3430)</text>
+    <text x="392" y="290" fill="#79c0ff">spx_tcs3430 active + auto-brightness</text>
+
+    <text x="22" y="312" fill="#8b949e">  [</text><text x="46" y="312" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="312" fill="#8b949e">]</text>
+    <text x="94" y="312" fill="#e6edf3">11. SLPI Sensors (IMU &amp; Compass)</text>
+    <text x="392" y="312" fill="#79c0ff">hexagonrpcd-sdsp.service active</text>
+
+    <text x="22" y="334" fill="#8b949e">  [</text><text x="46" y="334" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="334" fill="#8b949e">]</text>
+    <text x="94" y="334" fill="#e6edf3">12. Hardware TPM 2.0 (QSEE fTPM)</text>
+    <text x="392" y="334" fill="#79c0ff">/dev/tpm0 &amp; /dev/tpmrm0 active</text>
+
+    <text x="22" y="356" fill="#8b949e">  [</text><text x="46" y="356" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="356" fill="#8b949e">]</text>
+    <text x="94" y="356" fill="#e6edf3">13. Venus 4K Video Decoder</text>
+    <text x="392" y="356" fill="#79c0ff">/dev/video-venus-dec -&gt; /dev/video16</text>
+
+    <text x="22" y="378" fill="#8b949e">  [</text><text x="46" y="378" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="378" fill="#8b949e">]</text>
+    <text x="94" y="378" fill="#e6edf3">14. 4G LTE Modem (X24 / IPA v4.1)</text>
+    <text x="392" y="378" fill="#79c0ff">rmnet_ipa0 &amp; ModemManager active</text>
+
+    <text x="22" y="400" fill="#8b949e">  [</text><text x="46" y="400" fill="#3fb950" font-weight="700"> OK </text><text x="78" y="400" fill="#8b949e">]</text>
+    <text x="94" y="400" fill="#e6edf3">15. S2idle RPMh PM &amp; Shutdown</text>
+    <text x="392" y="400" fill="#79c0ff">sq2_s2idle_pm loaded + pre-shutdown enabled</text>
+  </g>
+</svg>

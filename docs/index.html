@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Surface Pro X SQ2 · Linux 7.3 ARM64 Enablement</title>
+  <meta name="description" content="Complete Linux 7.3 hardware enablement for Microsoft Surface Pro X SQ2 (Qualcomm SC8180X / ARM64): 3 Cameras + IR Face ID, Slim Pen 2 Haptics &amp; Hover Dot, 4G LTE, Venus 4K, USB-C DP, TPM 2.0 &amp; s2idle." />
+  <style>
+    :root {
+      --bg: #070b14;
+      --surface: #0f1629;
+      --surface-2: #151f38;
+      --border: #223052;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --cyan: #38bdf8;
+      --indigo: #818cf8;
+      --emerald: #34d399;
+      --pink: #f472b6;
+      --amber: #fbbf24;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: radial-gradient(circle at 80% 0%, rgba(56,189,248,0.12), transparent 45%),
+                  radial-gradient(circle at 10% 20%, rgba(129,140,248,0.10), transparent 40%),
+                  var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+    a { color: var(--cyan); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .container { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+    header {
+      padding: 48px 0 32px;
+      border-bottom: 1px solid rgba(34,48,82,0.7);
+    }
+    .nav {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 36px; flex-wrap: wrap; gap: 16px;
+    }
+    .brand {
+      font-weight: 800; font-size: 1.05rem; letter-spacing: -0.02em;
+      display: flex; align-items: center; gap: 10px; color: var(--text);
+    }
+    .brand-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--cyan), var(--emerald));
+      box-shadow: 0 0 12px var(--cyan);
+    }
+    .nav-links { display: flex; gap: 20px; font-size: 0.92rem; color: var(--muted); flex-wrap: wrap; }
+    .nav-links a { color: var(--muted); font-weight: 500; }
+    .nav-links a:hover { color: var(--text); text-decoration: none; }
+    .hero-banner { width: 100%; border-radius: 16px; display: block; box-shadow: 0 20px 50px rgba(0,0,0,0.45); margin-bottom: 28px; }
+    .hero-actions { display: flex; gap: 14px; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 11px 20px; border-radius: 10px; font-weight: 600; font-size: 0.95rem;
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    .btn:hover { text-decoration: none; transform: translateY(-1px); }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--cyan), var(--indigo));
+      color: #06101f; box-shadow: 0 8px 24px rgba(56,189,248,0.28);
+    }
+    .btn-secondary {
+      background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    }
+    .stats {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px; margin: 36px 0;
+    }
+    .stat-card {
+      background: rgba(15,22,41,0.85); border: 1px solid var(--border);
+      border-radius: 14px; padding: 20px;
+    }
+    .stat-num {
+      font-size: 1.9rem; font-weight: 800; letter-spacing: -0.03em;
+      background: linear-gradient(90deg, var(--cyan), var(--emerald));
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .stat-label { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
+    section { padding: 40px 0; border-bottom: 1px solid rgba(34,48,82,0.5); }
+    h2 { font-size: 1.6rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 10px; }
+    .subtitle { color: var(--muted); margin-bottom: 24px; font-size: 0.98rem; }
+    .grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+      gap: 16px;
+    }
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 14px; padding: 20px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .card-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .card-title { font-weight: 700; font-size: 1.02rem; }
+    .pill {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.72rem; font-weight: 700; padding: 3px 9px; border-radius: 999px;
+      background: rgba(52,211,153,0.14); color: var(--emerald); border: 1px solid rgba(52,211,153,0.35);
+      white-space: nowrap;
+    }
+    .card p { font-size: 0.9rem; color: var(--muted); }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.85em; background: rgba(30,41,59,0.85); padding: 2px 6px; border-radius: 5px; color: #bae6fd;
+    }
+    .code-box {
+      position: relative; background: #0a0f1d; border: 1px solid var(--border);
+      border-radius: 12px; padding: 18px 20px; overflow-x: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.88rem; color: #e2e8f0; margin-bottom: 16px;
+    }
+    .copy-btn {
+      position: absolute; top: 12px; right: 12px;
+      background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
+      padding: 5px 11px; border-radius: 7px; font-size: 0.78rem; cursor: pointer;
+    }
+    .copy-btn:hover { border-color: var(--cyan); color: var(--cyan); }
+    .diag-img { width: 100%; max-width: 920px; border-radius: 14px; display: block; margin: 16px auto 0; box-shadow: 0 14px 40px rgba(0,0,0,0.4); }
+    .docs-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+    .doc-link {
+      display: block; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 16px 18px; color: var(--text);
+      transition: border-color 0.15s ease;
+    }
+    .doc-link:hover { border-color: var(--cyan); text-decoration: none; }
+    .doc-link strong { display: block; margin-bottom: 4px; color: var(--cyan); }
+    .doc-link span { font-size: 0.85rem; color: var(--muted); }
+    footer {
+      padding: 36px 0; text-align: center; color: var(--muted); font-size: 0.88rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <nav class="nav">
+        <div class="brand">
+          <span class="brand-dot"></span>
+          <span>surface-pro-x-sq2-linux</span>
+        </div>
+        <div class="nav-links">
+          <a href="#subsystems">Subsystems</a>
+          <a href="#install">Quick Install</a>
+          <a href="#diagnostics">Health Check</a>
+          <a href="#docs">Documentation</a>
+          <a href="https://github.com/robertijtsma/surface-pro-x-sq2-linux">GitHub Repo</a>
+          <a href="https://github.com/robertijtsma">Profile</a>
+        </div>
+      </nav>
+      <img class="hero-banner" src="assets/banner.svg" alt="Surface Pro X SQ2 Linux 7.3 ARM64 Enablement Banner" />
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux">View Repository on GitHub</a>
+        <a class="btn btn-secondary" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux/releases/latest">Download Release v1.8.0</a>
+        <a class="btn btn-secondary" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux/blob/main/docs/SQ1_VS_SQ2.md">SQ1 vs. SQ2 Guide</a>
+      </div>
+      <div class="stats">
+        <div class="stat-card">
+          <div class="stat-num">15 / 15</div>
+          <div class="stat-label">Hardware Subsystems Verified Live</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num">14</div>
+          <div class="stat-label">Clean Linux 7.3 In-Tree Patches</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num">8</div>
+          <div class="stat-label">Auto-Rebuilding DKMS Modules</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num">10 / 10</div>
+          <div class="stat-label">Upstream linux-surface Issues Addressed</div>
+        </div>
+      </div>
+    </header>
+
+    <section id="subsystems">
+      <h2>Verified Hardware Subsystems (EL1 · Linux 7.3)</h2>
+      <p class="subtitle">Every subsystem below has been built, tested, and verified end-to-end on real Microsoft Surface Pro X SQ2 hardware with zero proprietary blobs committed.</p>
+      <div class="grid">
+        <div class="card">
+          <div class="card-head"><span class="card-title">All 3 Cameras &amp; Windows Hello IR Face ID</span><span class="pill">VERIFIED</span></div>
+          <p>Front 5 MP <code>OV5693</code>, Rear 13 MP <code>OV13858</code>, and Front IR <code>OV7251</code> on Titan 175 CAMSS with <code>libcamera</code> GPU SoftISP symmetric CCMs, automatic privacy LEDs, 850 nm IR strobe, and ~0.9 s Howdy IR unlock.</p>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="card-title">Slim Pen 2 Auto-Connect, Haptics &amp; Hover Dot</span><span class="pill">VERIFIED</span></div>
+          <p>BlueZ <code>Privacy = device</code> + Local IRK &amp; <code>0xFFF4</code> BLE-LC (&lt;1 s auto-reconnect), real-time <code>UsagePage 0x0E</code> tactile friction/click haptics over 7.5 ms BLE, crisp white hover dot extension, and Mutter 51.1 <code>#5215</code> crash guard.</p>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="card-title">4G LTE Modem (Snapdragon X24 / IPA v4.1)</span><span class="pill">VERIFIED</span></div>
+          <p>In-kernel Qualcomm <code>IPA v4.1</code> (<code>rmnet_ipa0</code>) paired with read-only EL1 SCM <code>0x02001a01</code> SPI NOR <code>modem_fsg</code> calibration extractor (<code>sq2_fsg_read</code>) and <code>ModemManager</code> SIM/eSIM support.</p>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="card-title">Qualcomm Venus 4K Hardware Video Decode</span><span class="pill">VERIFIED</span></div>
+          <p>SQ2 Iris1 / HFI4 decoder ported to Linux 7.3 via EL1 TrustZone <code>PAS 9</code>, verified bit-exact SHA-256 on 4K H.264, 4K HEVC, and 1080p VP9 with full <code>s2idle</code> TZ suspend/resume.</p>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="card-title">Adreno 685 GPU, eDP &amp; 2× USB-C DP Alt Mode</span><span class="pill">VERIFIED</span></div>
+          <p>2880×1920 eDP, Adreno 685 GMEM/HWCG/MMIO fixes, and <code>surface_typec</code> SAM PD integration driving QMP combo PHY orientation switching and external monitors on <code>DP-1</code> &amp; <code>DP-2</code>.</p>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="card-title">s2idle Deep Sleep, RPMh PM &amp; Clean Shutdown</span><span class="pill">VERIFIED</span></div>
+          <p>~0.9 s suspend / ~1.2 s resume with Hall-sensor lid &amp; power-button wake, <code>sq2_s2idle_pm</code> RPMh sleep-set retention &amp; <code>ACTIVE_ONLY</code> interconnects, and clean Venus/IPA pre-shutdown teardown.</p>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="card-title">Stereo Speakers, WCN3998 Wi-Fi &amp; BT</span><span class="pill">VERIFIED</span></div>
+          <p><code>surface_ldoe14_xob</code> XOB speaker rail + SoundWire AHB mutex + 8.5 V Smart Boost, plus Linux 7.3 <code>rmtfs</code>/<code>qcom_pd_mapper</code> QRTR race fix for rock-solid 866 Mbps Wi-Fi.</p>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="card-title">SLPI Sensors, TCS3430 ALS, GPS &amp; fTPM 2.0</span><span class="pill">VERIFIED</span></div>
+          <p>SLPI <code>LSM6DSO</code>/<code>AK0991x</code> auto-rotation, <code>spx_tcs3430</code> adaptive 33 FPS auto-brightness, on-demand QMI LOC hardware GPS, and Qualcomm QSEE hardware TPM 2.0 (<code>/dev/tpm0</code>).</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="install">
+      <h2>Quick Install (Arch Linux ARM64)</h2>
+      <p class="subtitle">Install the 8 DKMS kernel modules and full user-space stack directly, or build a native <code>pacman</code> package with <code>makepkg</code>.</p>
+      <div class="code-box">
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        <pre>git clone https://github.com/robertijtsma/surface-pro-x-sq2-linux.git
+cd surface-pro-x-sq2-linux
+
+# Option A: Direct DKMS + user-space installer
+sudo ./scripts/install-sq2-dkms.sh
+sudo ./scripts/install-sq2-userspace.sh
+
+# Option B: Native Arch Linux ARM package
+cd packaging/arch &amp;&amp; makepkg -si
+
+# Verify all 15 subsystems
+./scripts/surface-sq2-diag.sh</pre>
+      </div>
+    </section>
+
+    <section id="diagnostics">
+      <h2>15-Subsystem Hardware Health Check</h2>
+      <p class="subtitle">Live non-root diagnostic output from <code>./scripts/surface-sq2-diag.sh</code> on Surface Pro X SQ2 (<code>7.3.1-1-surface</code>).</p>
+      <img class="diag-img" src="assets/diag-preview.svg" alt="15/15 OK Hardware Diagnostic Output" />
+    </section>
+
+    <section id="docs">
+      <h2>Deep-Dive Hardware Documentation</h2>
+      <p class="subtitle">Full technical notes, register tables, Device Tree overlays, and step-by-step build instructions.</p>
+      <div class="docs-list">
+        <a class="doc-link" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux/blob/main/docs/BUILD_AND_INSTALL.md">
+          <strong>Build &amp; Installation Guide</strong>
+          <span>Step-by-step kernel patching, DKMS, DTBs, libcamera, Howdy &amp; Slim Pen 2 setup</span>
+        </a>
+        <a class="doc-link" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux/blob/main/docs/SQ1_VS_SQ2.md">
+          <strong>SQ1 vs. SQ2 Compatibility Matrix</strong>
+          <span>Exact compatibility breakdown for Surface Pro X SQ1 &amp; SQ2 owners</span>
+        </a>
+        <a class="doc-link" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux/blob/main/docs/SLIM_PEN_2_BLUETOOTH.md">
+          <strong>Slim Pen 2 BLE-LC, Haptics &amp; Hover Dot</strong>
+          <span>Local IRK root cause, UsagePage 0xFFF4 &amp; 0x0E haptics, Mutter #5215 fix</span>
+        </a>
+        <a class="doc-link" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux/blob/main/docs/CAMERA_HARDWARE.md">
+          <strong>Camera &amp; Titan 175 Hardware Notes</strong>
+          <span>CSIPHY wiring, SMMU Stream IDs, SPMI LDOs, VFE Lite &amp; DebayerEGL CCMs</span>
+        </a>
+        <a class="doc-link" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux/blob/main/docs/LTE_MODEM_IPA.md">
+          <strong>4G LTE Modem &amp; IPA v4.1 Notes</strong>
+          <span>Snapdragon X24, EL1 SCM 0x02001a01 SPI NOR FSG extractor &amp; QMAP</span>
+        </a>
+        <a class="doc-link" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux/blob/main/docs/VENUS_VIDEO_DECODE.md">
+          <strong>Venus 4K Hardware Video Decode</strong>
+          <span>Iris1 / HFI4 port to Linux 7.3, EL1 PAS 9 &amp; bit-exact SHA-256 results</span>
+        </a>
+        <a class="doc-link" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux/blob/main/docs/S2IDLE_SUSPEND.md">
+          <strong>s2idle Deep Sleep &amp; RPMh Notes</strong>
+          <span>DPU/DP resume, EL1 Venus TZ PM, spi-hid PM &amp; sq2_s2idle_pm sleep-set tuning</span>
+        </a>
+        <a class="doc-link" href="https://github.com/robertijtsma/surface-pro-x-sq2-linux/blob/main/CHANGELOG.md">
+          <strong>Release Changelog (v1.0.0 – v1.8.0)</strong>
+          <span>Complete timeline of hardware enablement milestones</span>
+        </a>
+      </div>
+    </section>
+
+    <footer>
+      Built for the <strong>linux-surface</strong> &amp; Qualcomm ARM64 Linux community · GPL-2.0-only · Zero proprietary blobs included · Maintained by <a href="https://github.com/robertijtsma">@robertijtsma</a>
+    </footer>
+  </div>
+
+  <script>
+    function copyCode(btn) {
+      const text = btn.parentElement.querySelector('pre').innerText;
+      navigator.clipboard.writeText(text).then(() => {
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = 'Copy'; }, 1800);
+      });
+    }
+  </script>
+</body>
+</html>
