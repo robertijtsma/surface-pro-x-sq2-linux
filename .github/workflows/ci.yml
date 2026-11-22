@@ -37,6 +37,6 @@ jobs:
 
       - name: Compile Howdy Face ID single-thread PAM wrappers
         run: |
-          gcc -O2 -Wall -Wextra -o /tmp/howdy-pam-wrapper faceid/howdy-pam-wrapper.c
-          gcc -O2 -Wall -Wextra -o /tmp/howdy-cli-wrapper faceid/howdy-cli-wrapper.c
-          rm -f /tmp/howdy-pam-wrapper /tmp/howdy-cli-wrapper
+          gcc -O2 -Wall -Wextra -o /tmp/howdy-compare-wrapper faceid/howdy_compare_wrapper.c
+          gcc -O2 -Wall -Wextra -o /tmp/howdy-cli-wrapper faceid/howdy_cli_wrapper.c
+          rm -f /tmp/howdy-compare-wrapper /tmp/howdy-cli-wrapper
