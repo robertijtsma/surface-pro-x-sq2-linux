@@ -1,0 +1,853 @@
+#!/usr/bin/env python3
+"""
+Surface Slim Pen 2 Native Tactile Haptics Daemon & CLI (Linux HID UsagePage 0x0E).
+
+Uses the Slim Pen 2's standard Bluetooth HID Simple Haptics Controller
+(UsagePage 0x0E, Report ID 0x41/0x42 on 0005:045E:0C0F) paired with real-time
+evdev events from IPTSD Virtual Stylus (045E:0C21) to deliver low-latency,
+pressure- and velocity-modulated tactile writing & erasing feedback on Linux.
+
+Zero polling when idle (blocks in select() on evdev), never grabs the stylus
+device, never touches SPI-HID 045E:0C21 hidraw, releases hidraw immediately on
+BLE disconnect, and survives s2idle / iptsd restarts cleanly.
+"""
+
+import argparse
+import configparser
+import errno
+import fcntl
+import glob
+import math
+import os
+import select
+import signal
+import struct
+import sys
+import time
+
+import evdev
+
+PEN_HID_ID = "0005:0000045E:00000C0F"
+STYLUS_NAME_PREFIX = "IPTSD Virtual Stylus"
+CONFIG_PATH = "/etc/surface-pen-haptics.conf"
+PID_FILE = "/run/surface-pen-haptics.pid"
+
+WAVEFORM_IDS = {
+    "none": 0x1001,
+    "stop": 0x1002,
+    "click": 0x1003,
+    "buzz": 0x1004,
+    "rumble": 0x1005,
+    "press": 0x1006,
+    "release": 0x1007,
+    "hover": 0x1008,
+    "success": 0x1009,
+    "error": 0x100A,
+    "ink": 0x100B,
+    "pencil": 0x100C,
+    "marker": 0x100D,
+    "chisel": 0x100E,
+    "brush": 0x100F,
+    "eraser": 0x1010,
+    "sparkle": 0x1011,
+}
+
+# Verified Surface Slim Pen 2 UsagePage 0x0E WaveformList ordinals (FEATURE 0x42)
+DEFAULT_ORDINALS = {
+    "none": 1,
+    "stop": 2,
+    "click": 3,
+    "press": 4,
+    "release": 5,
+    "hover": 6,
+    "success": 7,
+    "error": 8,
+    "ink": 9,
+    "pencil": 10,
+    "marker": 11,
+    "chisel": 12,
+    "brush": 13,
+    "eraser": 14,
+    "sparkle": 15,
+}
+
+CONTINUOUS_MODES = {"ink", "pencil", "marker", "chisel", "brush", "eraser", "sparkle"}
+
+DEFAULT_CONFIG = {
+    "mode": "pencil",           # ink | pencil | marker | chisel | brush | sparkle | click | off
+    "intensity": 85,            # 1..100 (%)
+    "tap_click": True,          # crisp 45ms Click pulse on every pen tip touch-down
+    "eraser_mode": "eraser",    # eraser | off | any continuous mode
+    "side_button_click": False, # avoid phantom DFT side-button haptics bursts during tip taps
+    "min_move_mm": 0.25,        # movement threshold to keep continuous texture alive
+    "drag_start_mm": 3.6,       # travel distance before switching from tap-click to drag texture
+}
+
+
+def patch_bluez_hogp_write_cmd_cache() -> bool:
+    """
+    Ensure BlueZ GATT cache for Surface Slim Pen 2 (045E:0C0F) uses its native Write With Response
+    (properties 0x0e -> ATT_OP_WRITE_REQ 0x12) on Output Report 0x2a4d characteristics so the pen's
+    GATT server receives acknowledged haptic writes, and configure 7.5ms BLE connection interval
+    (MinInterval=6, MaxInterval=6, Timeout=300) for sub-second reconnects and 15ms ATT round-trips.
+    """
+    changed = False
+    for cache_path in glob.glob("/var/lib/bluetooth/*/cache/*"):
+        try:
+            with open(cache_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            if "Surface Slim Pen 2" not in content:
+                continue
+            new_content = content.replace(
+                ":06:00002a4d-0000-1000-8000-00805f9b34fb",
+                ":0e:00002a4d-0000-1000-8000-00805f9b34fb",
+            )
+            if new_content != content:
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                changed = True
+        except OSError:
+            continue
+    for info_path in glob.glob("/var/lib/bluetooth/*/*/info"):
+        try:
+            with open(info_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            if "Surface Slim Pen 2" not in content:
+                continue
+            new_content = (
+                content.replace("MinInterval=12\n", "MinInterval=6\n")
+                .replace("MaxInterval=12\n", "MaxInterval=6\n")
+                .replace("Timeout=100\n", "Timeout=300\n")
+            )
+            if new_content != content:
+                with open(info_path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                changed = True
+        except OSError:
+            continue
+    return changed
+
+
+def hidiocsfeature(length: int) -> int:
+    return (3 << 30) | (ord("H") << 8) | 0x06 | (length << 16)
+
+
+def hidiocgfeature(length: int) -> int:
+    return (3 << 30) | (ord("H") << 8) | 0x07 | (length << 16)
+
+
+def load_config(path: str = CONFIG_PATH) -> dict:
+    cfg = dict(DEFAULT_CONFIG)
+    if not os.path.exists(path):
+        return cfg
+    cp = configparser.ConfigParser()
+    try:
+        cp.read(path)
+        if cp.has_section("Haptics"):
+            sec = cp["Haptics"]
+            mode = sec.get("mode", cfg["mode"]).strip().lower()
+            if mode == "off" or mode in WAVEFORM_IDS:
+                cfg["mode"] = mode
+            cfg["intensity"] = max(1, min(100, sec.getint("intensity", cfg["intensity"])))
+            cfg["tap_click"] = sec.getboolean("tap_click", cfg["tap_click"])
+            cfg["eraser_mode"] = sec.get("eraser_mode", cfg["eraser_mode"]).strip().lower()
+            cfg["side_button_click"] = sec.getboolean("side_button_click", cfg["side_button_click"])
+            cfg["min_move_mm"] = max(0.0, sec.getfloat("min_move_mm", cfg["min_move_mm"]))
+            cfg["drag_start_mm"] = max(0.2, sec.getfloat("drag_start_mm", cfg["drag_start_mm"]))
+    except Exception as exc:
+        print(f"[warn] Could not parse {path}: {exc}", file=sys.stderr)
+    return cfg
+
+
+def save_config(cfg: dict, path: str = CONFIG_PATH) -> None:
+    content = (
+        "[Haptics]\n"
+        f"mode = {cfg['mode']}\n"
+        f"intensity = {cfg['intensity']}\n"
+        f"tap_click = {'true' if cfg['tap_click'] else 'false'}\n"
+        f"eraser_mode = {cfg['eraser_mode']}\n"
+        f"side_button_click = {'true' if cfg['side_button_click'] else 'false'}\n"
+        f"min_move_mm = {cfg['min_move_mm']}\n"
+        f"drag_start_mm = {cfg['drag_start_mm']}\n"
+    )
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def find_pen_hidraw() -> str | None:
+    """Locate the newest active Slim Pen 2 BLE hidraw node (0005:045E:0C0F)."""
+    matches = []
+    for sys_path in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        try:
+            uevent = open(os.path.join(sys_path, "device", "uevent"), "r", encoding="utf-8", errors="ignore").read()
+            if PEN_HID_ID in uevent.upper():
+                dev_path = "/dev/" + os.path.basename(sys_path)
+                st = os.stat(dev_path)
+                matches.append((st.st_ctime_ns, dev_path))
+        except OSError:
+            continue
+    if not matches:
+        return None
+    matches.sort()
+    return matches[-1][1]
+
+
+def find_iptsd_stylus() -> str | None:
+    for path in sorted(glob.glob("/dev/input/event*")):
+        try:
+            dev = evdev.InputDevice(path)
+            name = dev.name
+            dev.close()
+            if name.startswith(STYLUS_NAME_PREFIX):
+                return path
+        except Exception:
+            continue
+    return None
+
+
+class SlimPenHapticsDevice:
+    """Low-latency wrapper around Slim Pen 2 BLE HID SimpleHapticsController (0x41/0x42)."""
+
+    def __init__(self):
+        self.fd: int | None = None
+        self.path: str | None = None
+        self.rdev: int | None = None
+        self.ino: int | None = None
+        self.ordinals: dict[str, int] = dict(DEFAULT_ORDINALS)
+        self.last_write_t: float = 0.0
+        self.settle_until: float = 0.0
+
+    def close(self) -> None:
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+        self.fd = None
+        self.path = None
+        self.rdev = None
+        self.ino = None
+
+    def ensure_open(self, force_reopen: bool = False) -> bool:
+        if not force_reopen and self.fd is not None:
+            return True
+
+        if force_reopen:
+            self.close()
+
+        dev_path = find_pen_hidraw()
+        if not dev_path:
+            self.close()
+            return False
+
+        try:
+            st = os.stat(dev_path)
+        except OSError:
+            self.close()
+            return False
+
+        if self.fd is not None and self.path == dev_path and self.rdev == st.st_rdev and self.ino == st.st_ino:
+            return True
+
+        self.close()
+        try:
+            fd = os.open(dev_path, os.O_RDWR | os.O_NONBLOCK)
+        except OSError as exc:
+            print(f"[warn] Cannot open {dev_path}: {exc}", file=sys.stderr, flush=True)
+            return False
+
+        self.fd = fd
+        self.path = dev_path
+        self.rdev = st.st_rdev
+        self.ino = st.st_ino
+        return True
+
+    def load_waveform_list(self) -> None:
+        if not self.ensure_open() or self.fd is None:
+            return
+        try:
+            buf = bytearray([0x42] + [0] * 84)
+            fcntl.ioctl(self.fd, hidiocgfeature(len(buf)), buf)
+            waves = struct.unpack("<20H", buf[45:85])
+            rev_ids = {v: k for k, v in WAVEFORM_IDS.items()}
+            mapping = {"none": 1, "stop": 2}
+            for idx in range(20):
+                w = waves[idx]
+                if w in rev_ids:
+                    mapping[rev_ids[w]] = idx + 3
+            if len(mapping) > 2:
+                self.ordinals = mapping
+        except OSError:
+            self.ordinals = dict(DEFAULT_ORDINALS)
+
+    def read_feature_41(self) -> tuple[int, int, int, int] | None:
+        if not self.ensure_open() or self.fd is None:
+            return None
+        try:
+            buf = bytearray([0x41] + [0] * 5)
+            fcntl.ioctl(self.fd, hidiocgfeature(len(buf)), buf)
+            return struct.unpack("<BBBH", buf[1:])
+        except OSError:
+            self.close()
+            return None
+
+    def trigger(self, waveform: str, intensity_255: int, cutoff_ms: int = 0, force: bool = False, auto_open: bool = True) -> bool:
+        now = time.monotonic()
+        if now < self.settle_until:
+            return False
+        if self.fd is None:
+            if not auto_open or not self.ensure_open() or self.fd is None:
+                return False
+        ord_num = self.ordinals.get(waveform)
+        if ord_num is None:
+            return False
+        min_gap = 0.045 if force else 0.065
+        if (now - self.last_write_t) < min_gap:
+            return False
+        inten = max(1, min(255, int(intensity_255)))
+        cutoff_10ms = max(0, min(254, int(round(cutoff_ms / 10.0)))) if cutoff_ms > 0 else 0
+        pkt = struct.pack("<BBBBBH", 0x41, 1, inten, ord_num, cutoff_10ms, 0)
+        try:
+            os.write(self.fd, pkt)
+            self.last_write_t = now
+            return True
+        except OSError as exc:
+            if exc.errno in (errno.ENODEV, errno.EIO, errno.EBADF, errno.EPIPE):
+                self.close()
+            return False
+
+    def stop(self) -> bool:
+        if self.fd is None:
+            return False
+        now = time.monotonic()
+        if now < self.settle_until or (now - self.last_write_t) < 0.065:
+            return False
+        # RepeatCount=1, Intensity=100 (matches Windows Slim Pen 2 driver), ManualTrigger=2 (WaveformStop)
+        pkt = struct.pack("<BBBBBH", 0x41, 1, 100, 2, 0, 0)
+        try:
+            os.write(self.fd, pkt)
+            self.last_write_t = now
+            return True
+        except OSError as exc:
+            if exc.errno in (errno.ENODEV, errno.EIO, errno.EBADF, errno.EPIPE):
+                self.close()
+            return False
+
+
+def run_daemon() -> int:
+    try:
+        with open(PID_FILE, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
+
+    cfg = load_config()
+    patch_bluez_hogp_write_cmd_cache()
+    reload_flag = [False]
+    connect_flag = [False]
+    disconnect_flag = [False]
+    stop_flag = [False]
+
+    def on_sighup(_sig, _frame):
+        reload_flag[0] = True
+
+    def on_sigusr1(_sig, _frame):
+        connect_flag[0] = True
+
+    def on_sigusr2(_sig, _frame):
+        disconnect_flag[0] = True
+
+    def on_sigterm(_sig, _frame):
+        stop_flag[0] = True
+
+    signal.signal(signal.SIGHUP, on_sighup)
+    signal.signal(signal.SIGUSR1, on_sigusr1)
+    signal.signal(signal.SIGUSR2, on_sigusr2)
+    signal.signal(signal.SIGTERM, on_sigterm)
+    signal.signal(signal.SIGINT, on_sigterm)
+
+    pen = SlimPenHapticsDevice()
+    pen.ensure_open()
+    print(
+        f"[info] surface-pen-haptics daemon started (mode={cfg['mode']}, intensity={cfg['intensity']}%, pen={pen.path})",
+        flush=True,
+    )
+
+    stylus: evdev.InputDevice | None = None
+    res_x = 35.0
+    res_y = 39.0
+    max_pressure = 4096.0
+
+    touch_down = False
+    stroke_down = False
+    pending_release_t = 0.0
+    pending_tap_t = 0.0
+    is_eraser = False
+    stylus_btn_down = False
+    last_btn_click_t = 0.0
+    last_tap_click_t = 0.0
+    cur_x = 0
+    cur_y = 0
+    cur_pressure = 0
+    down_x = None
+    down_y = None
+    down_t = 0.0
+    drag_started = False
+    anchor_x = None
+    anchor_y = None
+    last_motion_t = 0.0
+    last_tx_t = 0.0
+    haptics_active = False
+    pending_stop = False
+    active_waveform = ""
+    active_intensity = 0
+    pending_preopen_t = 0.0
+
+    # Non-zero cutoff (2500ms = 250 * 10ms, within LogicalMax=254) guarantees Slim Pen 2
+    # firmware starts the continuous 1995ms waveform immediately AND runs smoothly without
+    # chopping/restarting every 120ms; pen.stop() cuts it off cleanly on lift or pause.
+    CUTOFF_MS = 2500
+    LOOP_REFRESH_S = 1.55
+    MOD_INTERVAL_S = 0.12
+    INTENSITY_STEP = 22
+    STOP_IDLE_S = 0.090
+    RELEASE_DEBOUNCE_S = 0.065
+    TAP_TO_DRAG_MIN_S = 0.150
+
+    def open_stylus() -> bool:
+        nonlocal stylus, res_x, res_y, max_pressure
+        if stylus is not None:
+            try:
+                stylus.close()
+            except Exception:
+                pass
+            stylus = None
+        path = find_iptsd_stylus()
+        if not path:
+            return False
+        try:
+            dev = evdev.InputDevice(path)
+            caps = dev.capabilities(verbose=False)
+            for code, ai in caps.get(evdev.ecodes.EV_ABS, []):
+                if code == evdev.ecodes.ABS_X and ai.resolution > 0:
+                    res_x = float(ai.resolution)
+                elif code == evdev.ecodes.ABS_Y and ai.resolution > 0:
+                    res_y = float(ai.resolution)
+                elif code == evdev.ecodes.ABS_PRESSURE and ai.max > 0:
+                    max_pressure = float(ai.max)
+            stylus = dev
+            print(f"[ok] Monitoring {path} ({dev.name})", flush=True)
+            return True
+        except Exception:
+            return False
+
+    try:
+        while not stop_flag[0]:
+            now = time.monotonic()
+
+            if disconnect_flag[0]:
+                disconnect_flag[0] = False
+                pending_preopen_t = 0.0
+                pen.settle_until = 0.0
+                haptics_active = False
+                pending_stop = False
+                active_waveform = ""
+                active_intensity = 0
+                if pen.fd is not None:
+                    old = pen.path
+                    pen.close()
+                    print(f"[info] Released {old} on BLE disconnect", flush=True)
+
+            if connect_flag[0]:
+                connect_flag[0] = False
+                pen.close()
+                pending_stop = False
+                patch_bluez_hogp_write_cmd_cache()
+                # With 7.5ms BLE interval (MinInterval=6, MaxInterval=6), BlueZ finishes all 37
+                # GATT setup round-trips in ~0.68s and udev delivers SIGUSR1 at ~0.50s.
+                pen.settle_until = now + 0.35
+                pending_preopen_t = pen.settle_until
+                if pending_tap_t > 0.0:
+                    pending_tap_t = max(pending_tap_t, pen.settle_until + 0.015)
+
+            if pending_preopen_t > 0.0 and now >= pending_preopen_t:
+                pending_preopen_t = 0.0
+                pen.settle_until = 0.0
+                if pen.ensure_open(force_reopen=True):
+                    print(f"[ok] Pre-opened {pen.path} (0ms ready)", flush=True)
+
+            if reload_flag[0]:
+                reload_flag[0] = False
+                cfg = load_config()
+                print(f"[reload] mode={cfg['mode']} intensity={cfg['intensity']}% eraser={cfg['eraser_mode']}", flush=True)
+                if cfg["mode"] == "off" and (haptics_active or pending_stop):
+                    pen.stop()
+                    haptics_active = False
+                    pending_stop = False
+                    active_waveform = ""
+
+            if stylus is None:
+                if not open_stylus():
+                    time.sleep(1.0)
+                    continue
+
+            if pending_tap_t > 0.0:
+                timeout = max(0.005, min(0.025, pending_tap_t - now))
+            elif pending_stop:
+                timeout = max(0.01, min(0.02, (pen.last_write_t + 0.065) - now))
+            elif pending_release_t > 0.0:
+                timeout = max(0.01, min(0.02, pending_release_t - now))
+            elif pending_preopen_t > 0.0:
+                timeout = max(0.02, min(0.1, pending_preopen_t - now))
+            elif haptics_active:
+                timeout = 0.03
+            else:
+                timeout = 1.0
+
+            poller = select.poll()
+            poller.register(stylus.fd, select.POLLIN)
+            pen_fd = pen.fd
+            if pen_fd is not None:
+                # Watch only HUP/ERR (events=0) so incoming pen HID reports do not wake us,
+                # while a BLE disconnect releases pen.fd immediately (zero zombie hidraw6).
+                poller.register(pen_fd, 0)
+
+            try:
+                ready = poller.poll(int(timeout * 1000))
+            except (InterruptedError, ValueError):
+                continue
+
+            now = time.monotonic()
+
+            stylus_ready = False
+            for fd, revents in ready:
+                if pen_fd is not None and fd == pen_fd:
+                    if revents & (select.POLLHUP | select.POLLERR | select.POLLNVAL):
+                        old = pen.path
+                        pen.close()
+                        pen.settle_until = now + 0.80
+                        if pending_tap_t > 0.0:
+                            pending_tap_t = max(pending_tap_t, pen.settle_until + 0.015)
+                        haptics_active = False
+                        pending_stop = False
+                        active_waveform = ""
+                        active_intensity = 0
+                        print(f"[info] Released {old} on POLLHUP", flush=True)
+                elif fd == stylus.fd:
+                    stylus_ready = True
+
+            if stylus_ready:
+                try:
+                    events = list(stylus.read())
+                except BlockingIOError:
+                    events = []
+                except OSError:
+                    if haptics_active:
+                        pen.stop()
+                        haptics_active = False
+                        active_waveform = ""
+                    pen.close()
+                    touch_down = False
+                    stroke_down = False
+                    pending_release_t = 0.0
+                    pending_tap_t = 0.0
+                    pending_stop = False
+                    stylus_btn_down = False
+                    down_x = down_y = None
+                    drag_started = False
+                    anchor_x = anchor_y = None
+                    active_intensity = 0
+                    open_stylus()
+                    continue
+
+                syn_seen = False
+                just_touched_down = False
+                for ev in events:
+                    if ev.type == evdev.ecodes.EV_KEY:
+                        if ev.code == evdev.ecodes.BTN_TOUCH:
+                            new_down = bool(ev.value)
+                            touch_down = new_down
+                            if new_down:
+                                if pending_release_t > 0.0:
+                                    # Brief <65ms IPTSD contact micro-bounce mid-stroke: keep stroke seamless!
+                                    pending_release_t = 0.0
+                                elif not stroke_down:
+                                    stroke_down = True
+                                    just_touched_down = True
+                            else:
+                                if stroke_down and pending_release_t == 0.0:
+                                    pending_release_t = now + RELEASE_DEBOUNCE_S
+                        elif ev.code == evdev.ecodes.BTN_TOOL_RUBBER:
+                            is_eraser = bool(ev.value)
+                        elif ev.code == evdev.ecodes.BTN_TOOL_PEN and ev.value == 1:
+                            is_eraser = False
+                        elif ev.code == evdev.ecodes.BTN_STYLUS:
+                            pressed = bool(ev.value)
+                            if pressed and not stylus_btn_down and (now - last_btn_click_t) >= 0.25:
+                                last_btn_click_t = now
+                                if cfg["side_button_click"] and cfg["mode"] != "off":
+                                    base_inten = int(round(cfg["intensity"] * 2.55))
+                                    if pen.trigger("click", max(90, min(255, base_inten)), auto_open=False):
+                                        print(f"[haptics] side-button click on {pen.path}", flush=True)
+                            stylus_btn_down = pressed
+                    elif ev.type == evdev.ecodes.EV_ABS:
+                        if ev.code == evdev.ecodes.ABS_X:
+                            cur_x = ev.value
+                        elif ev.code == evdev.ecodes.ABS_Y:
+                            cur_y = ev.value
+                        elif ev.code == evdev.ecodes.ABS_PRESSURE:
+                            cur_pressure = ev.value
+                    elif ev.type == evdev.ecodes.EV_SYN and ev.code == evdev.ecodes.SYN_REPORT:
+                        syn_seen = True
+
+                # 1. Schedule crisp Click 15ms after pen tip touch-down (queued across fast BLE reconnect!)
+                if just_touched_down and cfg["mode"] != "off":
+                    pending_stop = False
+                    down_x, down_y = cur_x, cur_y
+                    down_t = now
+                    anchor_x, anchor_y = cur_x, cur_y
+                    drag_started = False
+                    last_motion_t = now
+                    wf = cfg["eraser_mode"] if is_eraser else cfg["mode"]
+                    if wf != "off":
+                        max_i = cfg["intensity"] * 2.55
+                        if cfg["tap_click"] or wf not in CONTINUOUS_MODES:
+                            if (now - last_tap_click_t) >= 0.150:
+                                target_t = now + 0.015
+                                if pen.settle_until > now:
+                                    target_t = max(target_t, pen.settle_until + 0.015)
+                                pending_tap_t = target_t
+                        elif stroke_down:
+                            drag_started = True
+                            p_norm = max(0.0, min(1.0, cur_pressure / max_pressure))
+                            inten = max(165, min(255, int(round(max_i * (0.76 + 0.24 * p_norm)))))
+                            if pen.trigger(wf, inten, cutoff_ms=CUTOFF_MS, force=True, auto_open=False):
+                                haptics_active = True
+                                active_waveform = wf
+                                active_intensity = inten
+                                last_tx_t = now
+                                print(f"[haptics] drag-start {wf} inten={inten}/255 on {pen.path}", flush=True)
+
+                # 2. Continuous pressure/speed-modulated drag texture once tip moves >= drag_start_mm after tap click
+                elif syn_seen and stroke_down and touch_down and cfg["mode"] != "off":
+                    if down_x is None or down_y is None:
+                        down_x, down_y = cur_x, cur_y
+                        down_t = now
+                    if anchor_x is None or anchor_y is None:
+                        anchor_x, anchor_y = cur_x, cur_y
+                        last_motion_t = now
+                    else:
+                        if not drag_started and (now - down_t) >= TAP_TO_DRAG_MIN_S:
+                            travel_mm = math.hypot((cur_x - down_x) / res_x, (cur_y - down_y) / res_y)
+                            if travel_mm >= cfg["drag_start_mm"]:
+                                drag_started = True
+                        dx_mm = (cur_x - anchor_x) / res_x
+                        dy_mm = (cur_y - anchor_y) / res_y
+                        dist_mm = math.hypot(dx_mm, dy_mm)
+                        if drag_started and dist_mm >= cfg["min_move_mm"]:
+                            dt = max(0.005, now - last_motion_t)
+                            speed_mm_s = dist_mm / dt
+                            anchor_x, anchor_y = cur_x, cur_y
+                            last_motion_t = now
+
+                            wf = cfg["eraser_mode"] if is_eraser else cfg["mode"]
+                            if wf in CONTINUOUS_MODES:
+                                p_norm = max(0.0, min(1.0, cur_pressure / max_pressure))
+                                v_norm = max(0.0, min(1.0, speed_mm_s / 120.0))
+                                scale = (0.72 + 0.28 * p_norm) * (0.82 + 0.18 * v_norm)
+                                max_i = cfg["intensity"] * 2.55
+                                inten = max(160, min(255, int(round(max_i * scale))))
+                                elapsed = now - last_tx_t
+                                need_send = (
+                                    (not haptics_active)
+                                    or (wf != active_waveform)
+                                    or (elapsed >= LOOP_REFRESH_S)
+                                    or (abs(inten - active_intensity) >= INTENSITY_STEP and elapsed >= MOD_INTERVAL_S)
+                                )
+                                if need_send:
+                                    if pen.trigger(wf, inten, cutoff_ms=CUTOFF_MS, auto_open=False):
+                                        if not haptics_active:
+                                            print(f"[haptics] drag {wf} inten={inten}/255 on {pen.path}", flush=True)
+                                        haptics_active = True
+                                        pending_stop = False
+                                        active_waveform = wf
+                                        active_intensity = inten
+                                        last_tx_t = now
+
+            if pending_tap_t > 0.0 and now >= pending_tap_t:
+                if pen.settle_until > now:
+                    pending_tap_t = pen.settle_until + 0.015
+                else:
+                    pending_tap_t = 0.0
+                    if cfg["mode"] != "off" and (now - last_tap_click_t) >= 0.150:
+                        wf = cfg["eraser_mode"] if is_eraser else cfg["mode"]
+                        if wf != "off":
+                            tap_wf = "click" if wf in CONTINUOUS_MODES else wf
+                            max_i = cfg["intensity"] * 2.55
+                            inten = max(160, min(255, int(round(max_i))))
+                            if pen.trigger(tap_wf, inten, cutoff_ms=0, force=True, auto_open=False):
+                                last_tap_click_t = now
+                                print(f"[haptics] tap {tap_wf} inten={inten}/255 on {pen.path}", flush=True)
+
+            if pending_release_t > 0.0 and now >= pending_release_t and not touch_down:
+                pending_release_t = 0.0
+                stroke_down = False
+                down_x = down_y = None
+                drag_started = False
+                anchor_x = anchor_y = None
+                if haptics_active:
+                    if pen.stop():
+                        haptics_active = False
+                        pending_stop = False
+                    else:
+                        haptics_active = False
+                        pending_stop = True
+                    active_waveform = ""
+                    active_intensity = 0
+            elif haptics_active and ((not stroke_down) or (touch_down and (now - last_motion_t) > STOP_IDLE_S)):
+                if pen.stop():
+                    haptics_active = False
+                    pending_stop = False
+                else:
+                    haptics_active = False
+                    pending_stop = True
+                active_waveform = ""
+                active_intensity = 0
+
+            if pending_stop:
+                if pen.fd is None or pen.stop():
+                    pending_stop = False
+    finally:
+        if haptics_active:
+            pen.stop()
+        pen.close()
+        if stylus is not None:
+            try:
+                stylus.close()
+            except Exception:
+                pass
+        try:
+            os.unlink(PID_FILE)
+        except OSError:
+            pass
+    return 0
+
+
+def signal_daemon(sig: int) -> bool:
+    try:
+        pid = int(open(PID_FILE, "r", encoding="utf-8").read().strip())
+        os.kill(pid, sig)
+        return True
+    except Exception:
+        return False
+
+
+def cmd_status() -> int:
+    cfg = load_config()
+    print(f"Config ({CONFIG_PATH}): mode={cfg['mode']} intensity={cfg['intensity']}% eraser={cfg['eraser_mode']} side_button_click={cfg['side_button_click']}")
+    pen = SlimPenHapticsDevice()
+    if not pen.ensure_open():
+        print("Slim Pen 2 BLE HID: sleeping / not connected (click pen top button or lift from charger to wake)")
+        return 0
+    try:
+        pen.load_waveform_list()
+        f41 = pen.read_feature_41()
+        print(f"Slim Pen 2 BLE HID: connected at {pen.path}")
+        if f41:
+            rep, inten, auto_tr, retrig = f41
+            rev_ord = {v: k for k, v in pen.ordinals.items()}
+            print(f"  FEATURE 0x41: AutoTrigger={auto_tr} ({rev_ord.get(auto_tr, 'unknown')}), Intensity={inten}/100 ({inten}%), RepeatCount={rep}, Retrigger={retrig}ms")
+        print("  Supported waveforms:", ", ".join(k for k in sorted(pen.ordinals, key=pen.ordinals.get) if k not in ("none", "stop")))
+    finally:
+        pen.close()
+    return 0
+
+
+def cmd_buzz(waveform: str, intensity_pct: int, duration_ms: int) -> int:
+    wf = waveform.lower()
+    if wf not in WAVEFORM_IDS or wf in ("none", "stop"):
+        print(f"Unknown waveform '{wf}'. Valid: {', '.join(k for k in DEFAULT_ORDINALS if k not in ('none', 'stop'))}", file=sys.stderr)
+        return 1
+    pen = SlimPenHapticsDevice()
+    if not pen.ensure_open():
+        print("Slim Pen 2 is sleeping/disconnected. Click the top button or lift it from the charger first.", file=sys.stderr)
+        return 1
+    try:
+        inten = max(1, min(100, int(round(intensity_pct))))
+        cutoff = duration_ms if wf in CONTINUOUS_MODES else 0
+        if not pen.trigger(wf, inten, cutoff_ms=cutoff):
+            print("Failed to send HID haptics output report.", file=sys.stderr)
+            return 1
+        print(f"[ok] Triggered '{wf}' at {inten}% ({inten}/100)" + (f" for {cutoff}ms" if cutoff else ""))
+    finally:
+        pen.close()
+    return 0
+
+
+def cmd_set(mode: str, intensity_pct: int | None) -> int:
+    mode = mode.lower()
+    valid = {"off"} | CONTINUOUS_MODES | {"click"}
+    if mode not in valid:
+        print(f"Invalid mode '{mode}'. Valid: {', '.join(sorted(valid))}", file=sys.stderr)
+        return 1
+    cfg = load_config()
+    cfg["mode"] = mode
+    if intensity_pct is not None:
+        cfg["intensity"] = max(1, min(100, intensity_pct))
+    try:
+        save_config(cfg)
+    except PermissionError:
+        print(f"Permission denied writing {CONFIG_PATH}. Run with sudo.", file=sys.stderr)
+        return 1
+
+    signaled = signal_daemon(signal.SIGHUP)
+    pen = SlimPenHapticsDevice()
+    if pen.ensure_open():
+        if cfg["mode"] != "off":
+            pen.trigger("click", max(50, min(100, int(round(cfg["intensity"])))))
+        pen.close()
+    print(f"[ok] Saved mode={cfg['mode']} intensity={cfg['intensity']}% (daemon reloaded={signaled})")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Surface Slim Pen 2 Tactile Haptics Daemon & CLI")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("daemon", help="Run real-time IPTSD -> BLE HID haptics daemon")
+    sub.add_parser("status", help="Show config and live Slim Pen 2 haptics status")
+    sub.add_parser("notify-connect", help="Notify running daemon that Slim Pen 2 hidraw appeared (udev hook)")
+    sub.add_parser("notify-disconnect", help="Notify running daemon that Slim Pen 2 hidraw was removed (udev hook)")
+
+    p_buzz = sub.add_parser("buzz", help="Trigger an immediate haptic waveform on the pen")
+    p_buzz.add_argument("waveform", nargs="?", default="success", help="Waveform name (default: success)")
+    p_buzz.add_argument("intensity", nargs="?", type=int, default=80, help="Intensity 1..100%% (default: 80)")
+    p_buzz.add_argument("duration", nargs="?", type=int, default=300, help="Duration ms for continuous waveforms (default: 300)")
+
+    p_set = sub.add_parser("set", help="Set tactile writing mode (pencil, ink, marker, chisel, brush, sparkle, click, off)")
+    p_set.add_argument("mode", help="Tactile mode")
+    p_set.add_argument("intensity", nargs="?", type=int, default=None, help="Intensity 1..100%%")
+
+    args = parser.parse_args()
+    if args.cmd == "daemon":
+        return run_daemon()
+    if args.cmd == "status":
+        return cmd_status()
+    if args.cmd == "notify-connect":
+        signal_daemon(signal.SIGUSR1)
+        return 0
+    if args.cmd == "notify-disconnect":
+        signal_daemon(signal.SIGUSR2)
+        return 0
+    if args.cmd == "buzz":
+        return cmd_buzz(args.waveform, args.intensity, args.duration)
+    if args.cmd == "set":
+        return cmd_set(args.mode, args.intensity)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

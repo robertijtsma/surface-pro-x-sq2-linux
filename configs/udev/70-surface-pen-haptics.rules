@@ -1,0 +1,5 @@
+# Surface Slim Pen 2 (0005:045E:0C0F) HID Simple Haptics Controller permissions & daemon connect/disconnect notifications
+# Must be numbered < 73 so systemd's 73-seat-late.rules applies TAG+="uaccess" ACLs for non-root CLI usage.
+# GROUP="input", MODE="0660" also ensures non-root CLI access if the pen connects while GDM owns the seat.
+ACTION=="add", SUBSYSTEM=="hidraw", SUBSYSTEMS=="hid", ATTRS{id/vendor}=="045e", ATTRS{id/product}=="0c0f", GROUP="input", MODE="0660", TAG+="uaccess", RUN+="/usr/local/bin/surface-pen-haptics notify-connect"
+ACTION=="remove", SUBSYSTEM=="hidraw", ENV{DEVPATH}=="*/0005:045E:0C0F.*/hidraw/hidraw*", RUN+="/usr/local/bin/surface-pen-haptics notify-disconnect"

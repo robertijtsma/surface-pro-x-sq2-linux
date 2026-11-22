@@ -1,0 +1,16 @@
+[Unit]
+Description=Surface Slim Pen 2 Real-Time Tactile Haptics Daemon
+After=bluetooth.service
+Wants=bluetooth.service
+Before=shutdown.target reboot.target halt.target
+Conflicts=shutdown.target reboot.target halt.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/surface-pen-haptics daemon
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=2
+
+[Install]
+WantedBy=multi-user.target

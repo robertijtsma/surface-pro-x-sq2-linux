@@ -90,3 +90,21 @@ sudo /usr/local/bin/surface-pen-blelc-setup --rearm
   - `btmgmt info` retains `privacy ll-privacy` across cold boot and `s2idle`.
   - `surface-pen-blelc.service` completes in ~300 ms on cold boot (`29 ms` post-`s2idle`) with 0 failed systemd units, 0 ordering cycles, and `spi_hid` `bus_error_count=0, logic_error_count=0`.
   - `IPTSD Virtual Touchscreen` and `IPTSD Virtual Stylus` remain clean (`active_keys=[]`) with no latched stylus cursor.
+
+## Real-Time Tactile Haptics (`UsagePage 0x0E`) & Crisp White Pen Hover Dot
+
+### 1. Native Tactile Haptics Daemon ([`daemons/pen/surface-pen-haptics`](../daemons/pen/surface-pen-haptics))
+- Pairs real-time `evdev` events from `IPTSD Virtual Stylus` (`045E:0C21`) with the Slim Pen 2's Bluetooth HID **Simple Haptics Controller** (`UsagePage 0x0E`, Report IDs `0x41`/`0x42` on `0005:045E:0C0F`) to deliver Windows-grade tactile writing, erasing, and tap-click feedback (`pencil`, `ink`, `marker`, `chisel`, `brush`, `eraser`, `sparkle`, `click`).
+- **Low-Latency 7.5 ms BLE Connection Interval & Native Write With Response**:
+  - Configures BlueZ `[LE]` `MinConnectionInterval=6, MaxConnectionInterval=6` (`7.50 ms`), `ScanIntervalAutoConnect=48, ScanWindowAutoConnect=48` (100% duty cycle), and native GATT Write With Response (`:0e:`, `ATT_OP_WRITE_REQ 0x12`) on `Handle 0x006b` (`Report 0x41`).
+  - Uses a 15 ms MPP tip-boost inrush stagger, 65 ms release debounce, 150 ms tap-to-drag threshold (`3.6 mm`), and tap-queueing across fast BLE wakes, eliminating GATT queue collisions and keeping the BLE connection continuous across writing and pause intervals.
+  - Managed via [`systemd/surface-pen-haptics.service`](../systemd/surface-pen-haptics.service) and hotplug udev hooks in [`configs/udev/70-surface-pen-haptics.rules`](../configs/udev/70-surface-pen-haptics.rules).
+
+### 2. Crisp White Pen Hover Dot & Mutter 51.1 `#5215` Guard
+- **GNOME Shell Extension** ([`extensions/surface-pen-dot@linux-surface/`](../extensions/surface-pen-dot@linux-surface/)):
+  - Renders a native Windows-style crisp white pen hover dot (smoothly expanding from 5 px to 8 px with pressure, or 10 px hollow ring for the eraser) by reading `IPTSD Virtual Stylus` via a synchronous `GPollableInputStream` (`GioUnix.InputStream.create_source`) with zero pending async `GTask` callbacks during lock/logout teardown.
+  - Calls `CursorTracker.inhibit_cursor_visibility()` while the stylus is in proximity so only the white hover dot is shown.
+- **Mutter 51.1 `#5215` Null-Guard & Tablet Cursor Suppressor** ([`daemons/pen/mutter-5215-nullguard.c`](../daemons/pen/mutter-5215-nullguard.c), [`configs/systemd/10-mutter-5215-nullguard.conf`](../configs/systemd/10-mutter-5215-nullguard.conf)):
+  - Preloaded into `gnome-shell` (`/usr/local/lib/libmutter-tablet-nullguard.so`) without modifying stock Arch `mutter` package files.
+  - Guards `wl_resource_get_client(NULL)` against upstream GNOME Mutter 51.1 crash [`mutter#5215`](https://gitlab.gnome.org/GNOME/mutter/-/issues/5215) during Wayland tablet focus changes, and forces `CLUTTER_SPRITE_ROLE_TABLET` cursor lookups to `CLUTTER_CURSOR_NONE` so the default mouse arrow never appears underneath the white pen dot.
+  - Paired with [`configs/udev/99-surface-input-clean.rules`](../configs/udev/99-surface-input-clean.rules) (`ATTRS{name}=="Surface Slim Pen 2*", ENV{LIBINPUT_IGNORE_DEVICE}="1"`), eliminating the 453 ms Mutter XKB keymap recompile freeze on BLE wake.

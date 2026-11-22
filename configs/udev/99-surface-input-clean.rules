@@ -3,9 +3,6 @@ ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="spi 045E:0C21*", ENV{LIB
 # Ignore unused Surface SSAM vendor HID nodes that have no input keys/axes
 ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="Microsoft Surface 045E:09AF UNKNOWN", ENV{LIBINPUT_IGNORE_DEVICE}="1"
 ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="Microsoft Surface 045E:09B0", ENV{LIBINPUT_IGNORE_DEVICE}="1"
-# Ignore Bluetooth Slim Pen 2 dummy evdev tablet/vendor nodes (real stylus input comes from iptsd;
-# repeated BLE sleep/wake hotplug of 'Surface Slim Pen 2 Pen' triggers a Mutter 51 SEGV in
-# meta_wayland_tablet_tool_set_focus() if the pen touches the screen during connect/disconnect).
-# Keep 'Surface Slim Pen 2 Keyboard' active for the top button (Super+F20) and /dev/hidraw* for haptics.
-ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="Surface Slim Pen 2 Pen", ENV{LIBINPUT_IGNORE_DEVICE}="1"
-ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="Surface Slim Pen 2", ENV{LIBINPUT_IGNORE_DEVICE}="1"
+# Ignore all Bluetooth Slim Pen 2 evdev nodes (real stylus input comes from iptsd, and haptics uses
+# /dev/hidraw*; hotplugging 'Surface Slim Pen 2 Keyboard' causes a 450ms XKB keymap stall in Mutter).
+ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="Surface Slim Pen 2*", ENV{LIBINPUT_IGNORE_DEVICE}="1"
